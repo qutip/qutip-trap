@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 
@@ -32,6 +32,7 @@ from qutip_trap.control.shaping import (
     symmetric_pulse,
 )
 from qutip_trap.control.table import CalEntry, CalibrationTable, Waveform
+from qutip_trap.dynamics.parallel import map_tasks, worker_count
 from qutip_trap.light.raman import (
     crosstalk_ratios,
     derive_optical_drive,
@@ -47,6 +48,7 @@ from qutip_trap.units import TWO_PI
 
 if TYPE_CHECKING:
     from qutip_trap.device.model import Device
+    from qutip_trap.dynamics.space import HilbertSpace
     from qutip_trap.run.space import ModeClass3
 
 CROSSTALK_MIN = 1e-6
@@ -195,6 +197,46 @@ def canonical_pairs(device: Device, pairs: Sequence[Sequence[int]] | None) -> tu
     return tuple(sorted(out))
 
 
+class _SpotCheck(NamedTuple):
+    """One pair's exact spot check, set up: the pair, its closed-form summary, the space it runs on, the pair's notes (its
+    note goes last) and the arguments of calibrate_entangling_angle (device, waveform, entangling drives, base table,
+    physics, single-qubit drives)."""
+
+    pair: tuple[int, int]
+    summary: str
+    space: HilbertSpace
+    notes: list[str]
+    args: tuple[Device, Waveform, Mapping[int, GateDrive], CalibrationTable, Physics, Mapping[int, GateDrive]]
+
+
+def _spot_check_task(item: tuple[_SpotCheck, Numerics]) -> CalibrationRun:
+    """A pair's spot check as a map task (module-level, so it pickles under map="parallel")."""
+    check, opts = item
+    device, waveform, ent, base, phys, drives = check.args
+    return calibrate_entangling_angle(
+        device,
+        waveform,
+        check.pair,
+        ent,
+        base,
+        space=check.space,
+        physics=phys,
+        chi_target_rad=CHI_MAXIMAL_RAD,
+        options=opts,
+        single_qubit_drives=drives,
+    )
+
+
+def _run_spot_checks(checks: Sequence[_SpotCheck], opts: Numerics) -> list[CalibrationRun]:
+    """The pairs' spot checks in their order: in-process when the map is serial, one worker is available or one pair is
+    checked (its integrations then keep the workers), else one pair per task over the workers, each integrating serially."""
+    workers = worker_count(opts)
+    if opts.map == "serial" or workers <= 1 or len(checks) < 2:
+        return [_spot_check_task((c, opts)) for c in checks]
+    inner = replace(opts, map="serial")
+    return map_tasks(_spot_check_task, [(c, inner) for c in checks], map_kind=opts.map, workers=workers)
+
+
 def surrogate_table(
     device: Device,
     *,
@@ -297,23 +339,31 @@ def surrogate_table(
         heating=heating,
         fitted_at_s=float(t0_s),
     )
-    # entangling waveforms per pair: closed-form solution, mode classes, exact spot check on the resolved space
+    # entangling waveforms per pair: closed-form solution, mode classes, exact spot check on the resolved space; the spot
+    # checks of different pairs are independent, so they run together once every pair is set up, and each pair's notes keep
+    # their place
     ms: dict[tuple[int, int], Waveform] = {}
     runs: dict[tuple[int, int], CalibrationRun] = {}
     classes_by_pair: dict[tuple[int, int], dict[int, ModeClass3]] = {}
     frozen_chi: dict[tuple[int, int], dict[int, float]] = {}
-    for a, b in canonical_pairs(device, pairs):
+    pair_notes: list[list[str]] = []
+    checks: list[_SpotCheck] = []
+    seeds: dict[tuple[int, int], Waveform] = {}
+    ordered = canonical_pairs(device, pairs)
+    for a, b in ordered:
+        own: list[str] = []
+        pair_notes.append(own)
         if a not in ent:
-            notes.append(f"pair {(a, b)}: ion {a} has no entangling drive; no waveform is solved for it")
+            own.append(f"pair {(a, b)}: ion {a} has no entangling drive; no waveform is solved for it")
             continue
         spec_a = ent[a]
         if spec_a.kind != "raman" or len(spec_a.beams) != 2:
-            notes.append(f"pair {(a, b)}: the surrogate solves Raman (bichromatic) waveforms only; skipped")
+            own.append(f"pair {(a, b)}: the surrogate solves Raman (bichromatic) waveforms only; skipped")
             continue
         try:
             pulse = surrogate_waveform(device, (a, b), (spec_a.beams[0], spec_a.beams[1]), nbar=occupations)
         except ClosureError as exc:
-            notes.append(f"pair {(a, b)}: no closed-form waveform ({exc}); skipped")
+            own.append(f"pair {(a, b)}: no closed-form waveform ({exc}); skipped")
             continue
         shaped, modes = pulse.shaped, pulse.modes
         space_for = partial(spot_check_space, device, modes, shaped.waveform, (a, b), opts)
@@ -338,38 +388,38 @@ def surrogate_table(
             )
             space, _classes_local = space_for(ions=sorted({i for p in played.pulses for i in p.drive.ions}))
             inside, dim_local, nnz_local = within_budget(space, opts)
-            notes.append(
+            own.append(
                 f"pair {(a, b)}: the joint spot-check space (dimension {dim}, {nnz} drive non-zeros) exceeds the JOINT_EXACT "
                 f"guards ({opts.joint_dimension_max}, {opts.nnz_max}); the exact check runs on the pair's GATE_LOCAL space "
                 f"(dims {space.dims}, dimension {dim_local}, {nnz_local} non-zeros)"
             )
             if not inside:
-                notes.append(
+                own.append(
                     f"pair {(a, b)}: the GATE_LOCAL spot-check space exceeds the guards too; the closed-form waveform is stored "
                     "as a seed"
                 )
         if spot_check and inside:
-            run = calibrate_entangling_angle(
-                device,
-                shaped.waveform,
-                (a, b),
-                ent,
-                base,
-                space=space,
-                physics=phys,
-                chi_target_rad=CHI_MAXIMAL_RAD,
-                options=opts,
-                single_qubit_drives=drives,
-            )
-            runs[(a, b)] = run
-            ms[(a, b)] = run.waveform
-            notes.append(
-                f"pair {(a, b)}: {pulse.summary}, resolved modes {tuple(t.mode for t in space.resolved)} "
-                f"(dims {space.dims}), surrogate error {run.surrogate_error:.4f}, converged {run.converged}"
+            checks.append(
+                _SpotCheck(
+                    (a, b), pulse.summary, space, own, (device, shaped.waveform, ent, base, phys, drives)
+                )
             )
         else:
-            ms[(a, b)] = shaped.waveform
-            notes.append(f"pair {(a, b)}: {pulse.summary} stored as the closed-form seed (no spot check)")
+            seeds[(a, b)] = shaped.waveform
+            own.append(f"pair {(a, b)}: {pulse.summary} stored as the closed-form seed (no spot check)")
+    for check, run in zip(checks, _run_spot_checks(checks, opts)):
+        runs[check.pair] = run
+        check.notes.append(
+            f"pair {check.pair}: {check.summary}, resolved modes {tuple(t.mode for t in check.space.resolved)} "
+            f"(dims {check.space.dims}), surrogate error {run.surrogate_error:.4f}, converged {run.converged}"
+        )
+    for own in pair_notes:
+        notes.extend(own)
+    for pair in ordered:
+        if pair in runs:
+            ms[pair] = runs[pair].waveform
+        elif pair in seeds:
+            ms[pair] = seeds[pair]
     # detection: the threshold and window on ion 0's simulated readout model (one threshold for the register)
     det_cal: DetectionCalibration | None = None
     detection: dict[str, CalEntry] = {}
