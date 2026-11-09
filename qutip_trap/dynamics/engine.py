@@ -657,7 +657,6 @@ class JointExactEngine:
         static_ops, pulse_channels_possible = self._collapse_setup(device, space)
         lindblad = _lindblad_method(options, space.dimension)
         map_kind = options.map
-        n_workers = worker_count(options)
         workers_used = 1
         map_used = "serial"
         propagator_solves = 0
@@ -713,6 +712,7 @@ class JointExactEngine:
         pulse_total = sum(1 for _a, _b, act in segments_of_run if act)
         pulse_done = 0
         progress_started = time.perf_counter()
+        idle_built: BuiltHamiltonian | None = None
         for seg_index, (a, b, active) in enumerate(segments_of_run):
             seg_started = time.perf_counter()
             dissipative_seg = bool(static_ops) or (bool(active) and pulse_channels_possible)
@@ -720,15 +720,21 @@ class JointExactEngine:
             bopts_seg = (
                 replace(bopts, kernel="assembled") if (mesolve_seg and bopts.kernel != "assembled") else bopts
             )
-            built = build_hamiltonian(
-                device,
-                active,
-                space,
-                sample=sample,
-                options=bopts_seg,
-                qubit_shifts_hz=self.qubit_shifts_hz,
-                frozen_n=frozen_n,
-            )
+            if active or idle_built is None:
+                built = build_hamiltonian(
+                    device,
+                    active,
+                    space,
+                    sample=sample,
+                    options=bopts_seg,
+                    qubit_shifts_hz=self.qubit_shifts_hz,
+                    frozen_n=frozen_n,
+                )
+                if not active:
+                    idle_built = built
+            else:
+                # an idle segment's Hamiltonian (H_mot + H_int under the run's sample) is the run's one idle Hamiltonian
+                built = idle_built
             seg_ops = self._segment_channels(device, active, space, built, static_ops, notes)
             c_ops = [c.op for c in seg_ops]
             times = self._segment_times(a, b)
@@ -905,6 +911,7 @@ class JointExactEngine:
                     weights = [1.0 / n_traj_seg] * n_traj_seg
                 n_stoch = n_traj_seg if improved_seg else len(kets)
                 # one worker runs in-process: a one-process pool would still fork a copy of this process per segment
+                n_workers = worker_count(options) if n_stoch > 1 else 1
                 seg_map = map_kind if (n_stoch > 1 and n_workers > 1) else "serial"
                 seg_workers = min(n_workers, n_stoch) if seg_map != "serial" else 1
                 mc_opts["map"], mc_opts["num_cpus"] = seg_map, seg_workers
