@@ -264,7 +264,9 @@ class HilbertSpace:
         return qt.Qobj(op.data, dims=dims)
 
     def identity(self) -> qt.Qobj:
-        return self.with_space_dims(qt.tensor(*self.factor_identities()))
+        return _cached(
+            self, ("identity",), lambda: self.with_space_dims(qt.tensor(*self.factor_identities()))
+        )
 
     def embed(self, op: qt.Qobj, factor: int) -> qt.Qobj:
         """``op`` on one tensor factor, identities elsewhere (CSR)."""
@@ -385,22 +387,29 @@ class HilbertSpace:
         """sigma_+^ion (or ``ion_op`` on the ion's factor) (x) prod_m D_m(i eta_m) over the resolved modes, times the ENR
         group's sum-generator exponential (CSR). Frozen modes enter through the coefficient's Debye-Waller factor."""
         f_ion = self.ion_factor(ion)
-        ops: dict[int, qt.Qobj] = {
-            f_ion: qudit_sigma_plus(self.ion_dims[f_ion]) if ion_op is None else ion_op
-        }
-        enr_etas: dict[int, float] = {}
-        for mode, eta in etas.items():
-            if eta == 0.0:
-                continue
-            cls = self.mode_class(mode)
-            if cls == "resolved":
-                ops[self.mode_factor(mode)] = self.displacement_factor(mode, eta)
-            elif cls == "enr":
-                enr_etas[mode] = eta
-        if enr_etas:
-            assert self.enr_factor is not None
-            ops[self.enr_factor] = self.enr_displacement(enr_etas)
-        return self.embed_many(ops)
+
+        def build() -> qt.Qobj:
+            ops: dict[int, qt.Qobj] = {
+                f_ion: qudit_sigma_plus(self.ion_dims[f_ion]) if ion_op is None else ion_op
+            }
+            enr_etas: dict[int, float] = {}
+            for mode, eta in etas.items():
+                if eta == 0.0:
+                    continue
+                cls = self.mode_class(mode)
+                if cls == "resolved":
+                    ops[self.mode_factor(mode)] = self.displacement_factor(mode, eta)
+                elif cls == "enr":
+                    enr_etas[mode] = eta
+            if enr_etas:
+                assert self.enr_factor is not None
+                ops[self.enr_factor] = self.enr_displacement(enr_etas)
+            return self.embed_many(ops)
+
+        if ion_op is None:
+            key = ("D_full", f_ion, tuple(sorted((m, _eta_key(e)) for m, e in etas.items() if e != 0.0)))
+            return _cached(self, key, build)
+        return build()
 
     def drive_operator_factorized(
         self, ion: int, etas: Mapping[int, float], *, ion_op: qt.Qobj | None = None
