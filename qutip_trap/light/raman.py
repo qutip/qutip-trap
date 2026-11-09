@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 import warnings
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -95,14 +95,29 @@ def mathieu_or_none(device: Device, ion: int) -> MathieuParameters | None:
     return device.trap.mathieu(device.crystal.species[ion])
 
 
+_LAMB_DICKE: dict[tuple[str, int, bytes], tuple[dict[int, float], bool]] = {}
+_LAMB_DICKE_MAX = 4096
+
+
 def lamb_dicke_parameters(device: Device, ion: int, delta_k: np.ndarray) -> tuple[dict[int, float], bool]:
-    """(eta_{ion, m} for every crystal mode, whether C0 from the trap's Mathieu record was applied)."""
-    params = mathieu_or_none(device, ion)
-    etas = {
-        m: float(device.crystal.lamb_dicke(ion, m, delta_k, micromotion=params))
-        for m in range(len(device.crystal.modes))
-    }
-    return etas, params is not None
+    """(eta_{ion, m} for every crystal mode, whether C0 from the trap's Mathieu record was applied), a new dict on every call.
+
+    Memoized by the device's digest, the ion and the bytes of delta_k: the digest is the device's identity (the roles it
+    leaves out play no part here), and the builder asks for the same ion and wavevector on every segment of a run."""
+    dk = np.ascontiguousarray(delta_k, dtype=float)
+    key = (device.hash(), int(ion), dk.tobytes())
+    hit = _LAMB_DICKE.get(key)
+    if hit is None:
+        params = mathieu_or_none(device, ion)
+        etas = {
+            m: float(device.crystal.lamb_dicke(ion, m, dk, micromotion=params))
+            for m in range(len(device.crystal.modes))
+        }
+        hit = (etas, params is not None)
+        if len(_LAMB_DICKE) >= _LAMB_DICKE_MAX:
+            _LAMB_DICKE.clear()
+        _LAMB_DICKE[key] = hit
+    return dict(hit[0]), hit[1]
 
 
 def _micromotion(device: Device, ion: int, delta_k: np.ndarray) -> MicromotionIndex | None:
@@ -112,8 +127,29 @@ def _micromotion(device: Device, ion: int, delta_k: np.ndarray) -> MicromotionIn
     return device.trap.micromotion_beta(device.crystal.species[ion], delta_k)
 
 
+_SCATTERING: dict[tuple[str, int, tuple[int, ...]], ScatteringBudget] = {}
+_SCATTERING_MAX = 1024
+
+
 def scattering_budget(device: Device, ion: int, beam_indices: Sequence[int]) -> ScatteringBudget:
-    """Rayleigh, spin-flip and leakage rates of both qubit states under the beams, at the ion's position."""
+    """Rayleigh, spin-flip and leakage rates of both qubit states under the beams, at the ion's position; memoized by the
+    device's digest, the ion and the beams (every pulse of a run asks again), each call returning its own dicts."""
+    key = (device.hash(), int(ion), tuple(int(b) for b in beam_indices))
+    hit = _SCATTERING.get(key)
+    if hit is None:
+        hit = _scattering_budget(device, ion, beam_indices)
+        if len(_SCATTERING) >= _SCATTERING_MAX:
+            _SCATTERING.clear()
+        _SCATTERING[key] = hit
+    return replace(
+        hit,
+        rayleigh_per_s=dict(hit.rayleigh_per_s),
+        raman_spin_flip_per_s=dict(hit.raman_spin_flip_per_s),
+        leakage_per_s=dict(hit.leakage_per_s),
+    )
+
+
+def _scattering_budget(device: Device, ion: int, beam_indices: Sequence[int]) -> ScatteringBudget:
     st = _structure(device, ion)
     pos = _position(device, ion)
     lower, upper = device.crystal.species[ion].qubit
