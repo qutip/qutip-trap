@@ -148,9 +148,10 @@ class FactorizedOperator(Data):  # type: ignore[misc]
         if a.shape[0] != self.shape[0]:
             raise ValueError(f"state of dimension {a.shape[0]} does not live on dims {self.dims}")
         a2 = np.ascontiguousarray(a.reshape(-1, 1) if vector else a, dtype=complex)
-        if self._alone is None:
-            self._alone = FactorizedSum([self])
-        single = self._alone._single
+        alone = self._alone
+        if alone is None:
+            alone = self._alone = FactorizedSum([self])
+        single = alone._single
         if single is not None:
             out = single.apply(a2, complex(scale))
         else:
@@ -362,7 +363,7 @@ class _Single:
     the slice of the target block; the same elements multiplied in the same order as the batch's gather, steps and
     scatter, with none of their per-term bookkeeping."""
 
-    __slots__ = ("_plans", "batch", "inverse", "perm", "position", "source", "target")
+    __slots__ = ("_plans", "batch", "inverse", "perm", "position", "sliced", "source", "tail", "target")
 
     def __init__(self, batch: _Batch, position: int) -> None:
         (term,) = batch.terms
@@ -378,31 +379,34 @@ class _Single:
         kept = [f for f in range(len(dims)) if f not in {s for s, _r, _c in term.sliced}] + [_COLUMNS]
         self.perm = tuple(kept.index(f) for f in batch.orders[0])
         self.inverse = tuple(int(i) for i in np.argsort(self.perm))
-        self._plans: dict[
-            int, tuple[tuple[int, ...], tuple[int, ...], tuple[tuple[str, int, int, int, np.ndarray], ...]]
-        ] = {}
+        self.sliced = bool(term.sliced)
+        self.tail = complex(batch.tail[0])
+        self._plans: dict[int, _SinglePlan] = {}
 
-    def _plan(
-        self, ncols: int
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[tuple[str, int, int, int, np.ndarray], ...]]:
-        """(the state's tensor shape, the block's layout shape, every step with its one matrix) at ``ncols`` columns."""
+    def _plan(self, ncols: int) -> _SinglePlan:
+        """How the term applies at ``ncols`` columns (``_SinglePlan``)."""
         plan = self._plans.get(ncols)
         if plan is None:
             batch = self.batch
-            state = batch.terms[0].dims + (ncols,)
+            dims = batch.terms[0].dims
+            state = dims + (ncols,)
             layout = tuple(ncols if n == _COLUMNS else n for n in batch.shape)
+            natural = tuple(state[f] for f in range(len(state)) if not isinstance(self.source[f], int))
+            # the transposes only move length-one axes (the column axis at one column): the memory order is the layout's
+            moved = [p for p in self.perm if natural[p] > 1]
             steps = tuple((*op, m[0]) for op, m in zip(batch.ops(ncols), batch.mats))
-            plan = (state, layout, steps)
+            plan = _SinglePlan(state, layout, natural, moved == sorted(moved), steps)
             self._plans[ncols] = plan
         return plan
 
     def apply(self, x: np.ndarray, alpha: complex) -> np.ndarray:
         """alpha x the term @ x for a C-contiguous complex (D, ncols) ``x``: a new (D, ncols) array."""
         ncols = x.shape[1]
-        state, layout, steps = self._plan(ncols)
-        y = np.ascontiguousarray(x.reshape(state)[self.source].transpose(self.perm))
+        plan = self._plans.get(ncols) or self._plan(ncols)
+        view = x.reshape(plan.state)[self.source]
+        y = np.ascontiguousarray(view if plan.in_order else view.transpose(self.perm))
         first = True
-        for code, lead, d, trail, m in steps:
+        for code, lead, d, trail, m in plan.steps:
             if first:
                 if alpha != 1.0:  # QuTiP's dispatch passes scale 1 and applies the coefficient itself
                     m = m * alpha
@@ -416,13 +420,24 @@ class _Single:
             else:
                 y = y.reshape(lead, d, trail) * m[None, :, None]
         if first:
-            y = y * (self.batch.tail[0] * alpha)
-        result = y.reshape(layout).transpose(self.inverse)
-        if not self.batch.terms[0].sliced:
+            y = y * (self.tail * alpha)
+        result = y.reshape(plan.natural) if plan.in_order else y.reshape(plan.layout).transpose(self.inverse)
+        if not self.sliced:
             return np.ascontiguousarray(result).reshape(-1, ncols)
-        out = np.zeros(state, dtype=complex)
+        out = np.zeros(plan.state, dtype=complex)
         out[self.target] = result
         return out.reshape(-1, ncols)
+
+
+class _SinglePlan(NamedTuple):
+    """A lone term at one column count: the state's tensor shape, the block's layout shape and its natural (unpermuted)
+    shape, whether the layout is the natural memory order (only length-one axes move), and every step with its matrix."""
+
+    state: tuple[int, ...]
+    layout: tuple[int, ...]
+    natural: tuple[int, ...]
+    in_order: bool
+    steps: tuple[tuple[str, int, int, int, np.ndarray], ...]
 
 
 class _Scatter(NamedTuple):
