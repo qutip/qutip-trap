@@ -10,9 +10,11 @@ state, and every drive operator keeps its form (factorized or CSR). The engine m
 the results equal the Schroedinger-picture integration to the solver tolerance, and the integrator follows the drive and
 detuning frequencies instead of the Fock energies.
 
-A constant collapse operator that is an eigenoperator of ad_{H_0} (the heating ladder operators, sigma_z, a^dag a) becomes
-``[c, e^{i lambda t}]``; any other collapse operator (a recoil kick, the time-dependent intensity-noise channel) keeps the
-segment in the Schroedinger picture, where ``mcsolve`` merges its c^dag c into one constant matrix.
+A constant collapse operator that is an eigenoperator of ad_{H_0} (the heating ladder operators, sigma_z, a^dag a) is
+e^{i lambda t} c in the frame, and the trajectories take it as c: the two have one dissipator, one c^dag c and one jump rate,
+and the phase would only multiply a post-jump state, globally, so ``mcsolve`` keeps one constant c^dag c instead of
+evaluating |e^{i lambda t}|^2 at every right-hand side. Any other collapse operator (a recoil kick, the time-dependent
+intensity-noise channel) keeps the segment in the Schroedinger picture.
 """
 
 from __future__ import annotations
@@ -27,7 +29,6 @@ from qutip.core import data as _data
 from qutip.core.data import Data, Dense
 from qutip.core.dimensions import Dimensions
 
-from qutip_trap.dynamics.coefficients import function_coefficient
 from qutip_trap.dynamics.kernels import FactorizedOperator, FactorizedSum, _prod
 
 # ---- the frame's energies -----------------------------------------------------------------------------------------------------
@@ -363,11 +364,6 @@ class RotatingSegment:
     notes: tuple[str, ...] = field(default_factory=tuple)
 
 
-def _phase_coefficient(t: float, lam: float, **_: object) -> complex:
-    """e^{i lambda t}, the rotating-frame coefficient of an eigenoperator of ad_{H_0}."""
-    return complex(math.cos(lam * t), math.sin(lam * t))
-
-
 def _split_terms(h: qt.QobjEvo) -> tuple[qt.Qobj | None, list[tuple[qt.Qobj, object]]] | None:
     """(constant part, [(Qobj, Coefficient)]) of a list-form ``QobjEvo``; None when it holds a function element."""
     const: qt.Qobj | None = None
@@ -395,17 +391,15 @@ def frame_energies_of(static: qt.Qobj, dims: Sequence[int]) -> FrameEnergies | N
     return FrameEnergies(dims, parts)
 
 
-def rotating_collapse(op: qt.Qobj | qt.QobjEvo, frame: FrameEnergies) -> qt.Qobj | qt.QobjEvo | None:
-    """A constant collapse operator in the rotating frame: unchanged when it commutes with H_0, ``[c, e^{i lambda t}]`` for
-    another eigenoperator of ad_{H_0}; None for a non-eigenoperator or a time-dependent one."""
+def rotating_collapse(op: qt.Qobj | qt.QobjEvo, frame: FrameEnergies) -> qt.Qobj | None:
+    """A constant collapse operator as the trajectories take it in the rotating frame: itself, when it is an eigenoperator of
+    ad_{H_0} (e^{i lambda t} c jumps as c does, up to a global phase of the post-jump state); None for a non-eigenoperator or
+    a time-dependent one."""
     if not isinstance(op, qt.Qobj):
         return None
-    lam = eigen_frequency(op, frame.energies)
-    if lam is None:
+    if eigen_frequency(op, frame.energies) is None:
         return None
-    if lam == 0.0:
-        return op
-    return qt.QobjEvo([[op, function_coefficient(_phase_coefficient, {"lam": lam})]])
+    return op
 
 
 def rotating_frame(
@@ -429,13 +423,17 @@ def rotating_frame(
         return None
     drive = RotatingDrive(frame, [q.data for q, _c in evo], [c for _q, c in evo])
     rotated: list[qt.Qobj | qt.QobjEvo] = []
+    n_phase = 0
     for c in c_ops:
         r = rotating_collapse(c, frame)
         if r is None:
             return None
         rotated.append(r)
+        n_phase += int(eigen_frequency(r, frame.energies) != 0.0)
     notes: list[str] = []
-    n_phase = sum(1 for c, r in zip(c_ops, rotated) if isinstance(c, qt.Qobj) and isinstance(r, qt.QobjEvo))
     if n_phase:
-        notes.append(f"{n_phase} collapse operator(s) carry the e^(i lambda t) phase of the rotating frame")
+        notes.append(
+            f"{n_phase} collapse operator(s) jump as c where the rotating frame has e^(i lambda t) c: one dissipator and "
+            "one jump rate, the phase a global one of the post-jump state"
+        )
     return RotatingSegment(qt.QobjEvo(drive), tuple(rotated), frame, tuple(notes))

@@ -185,13 +185,13 @@ def test_rotating_frame_of_the_real_hamiltonian_is_theta_dag_v_theta(ms_fixture)
             )
             got = rot.H.matmul(t, psi).full().ravel()
             assert np.max(np.abs(got - expected)) < 1e-12 * max(1.0, float(np.max(np.abs(expected))))
-        # collapse operators: the heating ladder carries the phase, sigma_z is unchanged
+        # collapse operators: the heating ladder is e^(-i omega t) a in the frame and jumps as a (one dissipator, one rate),
+        # sigma_z commutes with H_0
         c_a, c_z = rot.c_ops
-        assert isinstance(c_a, qt.QobjEvo) and c_z is space.sigma_z(1)
+        assert c_a is a2 and c_z is space.sigma_z(1)
         omega2 = built.mode_frequencies_rad_s[2]
-        t = 2.3e-6
-        assert (c_a(t) - a2 * np.exp(-1j * omega2 * t)).norm() < 1e-9 * a2.norm()
-        assert any("phase of the rotating frame" in n for n in rot.notes)
+        assert eigen_frequency(a2, rot.frame.energies) == pytest.approx(-omega2, rel=1e-12)
+        assert any("global one of the post-jump state" in n for n in rot.notes)
         # a recoil kick is not an eigenoperator of H_0: the segment keeps the Schroedinger picture
         kick = space.embed_many({0: qudit_sigma_plus(2), 2: displacement_operator(10, 0.1j)})
         assert rotating_frame(built.H, space.dims, [a2, kick]) is None
