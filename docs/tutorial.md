@@ -48,8 +48,8 @@ Frequencies are in Hz, times in seconds and angles in radians throughout, except
 qutip-trap needs Python 3.13 and [uv](https://docs.astral.sh/uv/). It is not on PyPI yet:
 
 ```sh
-uv add git+https://github.com/splch/qutip-trap                 # the core
-uv add "qutip-trap[qiskit] @ git+https://github.com/splch/qutip-trap"   # with the Qiskit backend
+uv add git+https://github.com/qutip/qutip-trap                 # the core
+uv add "qutip-trap[qiskit] @ git+https://github.com/qutip/qutip-trap"   # with the Qiskit backend
 ```
 
 From a checkout, `uv sync --group dev` installs everything this tutorial uses, Qiskit included.

@@ -46,7 +46,7 @@ so the index is written into the package before building:
     uv run --package qutip-trap-app python -m qutip_trap_app.provenance   # writes src/qutip_trap_app/provenance_index.json
     cd qutip_trap_app && uv run --project .. flet build macos              # or windows, linux, web
 
-The GitHub Pages site, https://splch.github.io/qutip-trap/, is the static Pyodide build deployed by
+The GitHub Pages site, https://qutip.org/qutip-trap/, is the static Pyodide build deployed by
 `.github/workflows/pages.yml`: QuTiP 5.3.1 compiled for Pyodide 314 (there is no WebAssembly wheel on PyPI), the core's
 wheel, then `flet build web --python-version 3.14 --base-url /qutip-trap/ --route-url-strategy hash`. In the browser the
 worker runs in-process (`workers.IN_PROCESS`): the page waits for a request instead of streaming its progress.

@@ -6,14 +6,14 @@ A first-principles trapped-ion quantum computer simulator built on [QuTiP](https
 
 A run holds the ions in a trap and solves for their crystal and motional modes, cools and optically pumps them, compiles the circuit to the native gates (GPi, GPi2, Mølmer-Sørensen, ZZ, virtual RZ), schedules laser pulses from a calibration performed on the simulated device, integrates every pulse on the joint qubit-plus-motion state under the spin-motion Hamiltonian with noise channels whose rates follow from the device parameters, and reads the ions out by state-dependent fluorescence. Every `Result` states which fidelity level ran, which Hilbert space was integrated and every approximation that was made.
 
-The Flet application runs in the browser at https://splch.github.io/qutip-trap/ (Python and QuTiP compiled to WebAssembly; the first load fetches about 60 MB).
+The Flet application runs in the browser at https://qutip.org/qutip-trap/ (Python and QuTiP compiled to WebAssembly; the first load fetches about 60 MB).
 
 ## Install
 
 Python 3.13 and [uv](https://docs.astral.sh/uv/). The package is not on PyPI yet.
 
 ```sh
-uv add git+https://github.com/splch/qutip-trap
+uv add git+https://github.com/qutip/qutip-trap
 ```
 
 Extras: `qiskit` (a Qiskit `BackendV2`) and `gui` (Flet, which the application in `qutip_trap_app` needs). The application
@@ -68,7 +68,7 @@ Circuits also load from OpenQASM 2 and IonQ JSON (`trap.Circuit.from_openqasm`, 
 ## Development
 
 ```sh
-git clone https://github.com/splch/qutip-trap && cd qutip-trap
+git clone https://github.com/qutip/qutip-trap && cd qutip-trap
 uv sync --group dev
 uv run pytest -n 4 --dist loadscope -m "not slow and not heavy"
 uv run ruff check . && uv run ruff format --check . && uv run mypy

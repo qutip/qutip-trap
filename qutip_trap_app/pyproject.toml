@@ -54,7 +54,7 @@ module = ["qutip", "qutip.*", "scipy", "scipy.*", "flet_charts", "flet_charts.*"
 ignore_missing_imports = true
 
 [tool.flet]
-org = "io.github.splch"
+org = "org.qutip"
 product = "qutip-trap-app"
 company = "qutip-trap"
 copyright = "Copyright (C) 2026 Spencer Churchill"

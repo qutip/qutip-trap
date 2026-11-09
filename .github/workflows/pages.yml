@@ -1,6 +1,6 @@
 name: pages
 
-# the Flet app as a static site (Pyodide 314 in the browser) at https://splch.github.io/qutip-trap/
+# the Flet app as a static site (Pyodide 314 in the browser) at https://qutip.org/qutip-trap/
 on:
   push:
     branches: [main]
