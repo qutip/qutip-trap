@@ -159,7 +159,9 @@ class SumProgram:
     def __init__(self, operators: Sequence[Data]) -> None:
         self.operators = tuple(operators)
         positions = [k for k, op in enumerate(self.operators) if isinstance(op, FactorizedOperator)]
-        self.others = tuple(k for k in range(len(self.operators)) if k not in set(positions))
+        self.others = tuple(
+            k for k, op in enumerate(self.operators) if not isinstance(op, FactorizedOperator)
+        )
         self.fused = FactorizedSum([self.operators[k] for k in positions]) if positions else None
         # every operator factorized (the common case) reads the coefficient vector whole
         self.factorized: np.ndarray | slice = (

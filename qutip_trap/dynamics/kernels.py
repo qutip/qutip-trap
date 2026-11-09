@@ -10,9 +10,10 @@ group's sum-generator exponential is not a product, so a drive on an ENR mode is
 
 The ``auto`` choice of ``BuilderOptions.kernel`` is the cost model below, fitted through ``PhasedSum.apply`` (the rotating
 frame's right-hand side) over the sigma_+ and sigma_- terms of one to four ions on spaces of dimension 24 to 2048: the
-assembled terms cost their non-zeros at 0.45 ns (0.59 ns per stored one), the factorized ones the elements of their gathered source blocks at
-6.5 ns (gather, two products and scatter) and every product of a middle mode factor; a factorized register is the cheaper
-on every space with two resolved modes or more, and the assembled one on a single mode below a few dozen states.
+assembled terms cost their non-zeros at 0.45 ns (0.59 ns per stored one), the factorized ones the elements of their
+gathered source blocks at 6.5 ns (gather, two products and scatter) and every product of a middle mode factor; a
+factorized register is the cheaper on every space with two resolved modes or more, and the assembled one on a single mode
+below a few dozen states.
 """
 
 from __future__ import annotations
