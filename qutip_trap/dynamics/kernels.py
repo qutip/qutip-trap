@@ -150,7 +150,11 @@ class FactorizedOperator(Data):  # type: ignore[misc]
         a2 = np.ascontiguousarray(a.reshape(-1, 1) if vector else a, dtype=complex)
         if self._alone is None:
             self._alone = FactorizedSum([self])
-        out = self._alone.apply(a2, np.array([complex(scale)]))
+        single = self._alone._single
+        if single is not None:
+            out = single.apply(a2, complex(scale))
+        else:
+            out = np.zeros(a2.shape, dtype=complex)  # a zero operator: no live term
         return out.reshape(-1) if vector else out
 
     @property
@@ -257,7 +261,7 @@ class _Batch:
     changes the number of calls, not the arithmetic.
     """
 
-    __slots__ = ("_layouts", "k", "mats", "orders", "shape", "tail", "terms")
+    __slots__ = ("_layouts", "_ops", "k", "mats", "orders", "shape", "tail", "terms")
 
     def __init__(self, terms: Sequence[_Term]) -> None:
         first = terms[0]
@@ -277,13 +281,24 @@ class _Batch:
         self.mats = tuple(mats)
         self.tail = np.array([t.tail for t in terms], dtype=complex)
         self._layouts: dict[int, _Layout] = {}
+        self._ops: dict[int, tuple[tuple[str, int, int, int], ...]] = {}
 
     def layout(self, ncols: int) -> _Layout:
         lay = self._layouts.get(ncols)
         if lay is None:
-            lay = self._build_layout(ncols)
+            lay = _Layout(
+                self._block_index(ncols, "source"), self._block_index(ncols, "target"), self.ops(ncols)
+            )
             self._layouts[ncols] = lay
         return lay
+
+    def ops(self, ncols: int) -> tuple[tuple[str, int, int, int], ...]:
+        """How the block is reshaped around every step at ``ncols`` columns (``_Layout.ops``), without the index arrays."""
+        ops = self._ops.get(ncols)
+        if ops is None:
+            ops = self._build_ops(ncols)
+            self._ops[ncols] = ops
+        return ops
 
     def _block_index(self, ncols: int, which: Literal["source", "target"]) -> np.ndarray:
         dims = self.terms[0].dims
@@ -298,7 +313,7 @@ class _Batch:
             rows.append(np.ascontiguousarray(base[tuple(index)].transpose(perm)).reshape(-1))
         return np.stack(rows)
 
-    def _build_layout(self, ncols: int) -> _Layout:
+    def _build_ops(self, ncols: int) -> tuple[tuple[str, int, int, int], ...]:
         shape = [ncols if n == _COLUMNS else n for n in self.shape]
         order = self.orders[0]
         ops: list[tuple[str, int, int, int]] = []
@@ -313,15 +328,18 @@ class _Batch:
                 ops.append(("right", lead, d, trail))
             else:
                 ops.append(("middle", lead, d, trail))
-        return _Layout(self._block_index(ncols, "source"), self._block_index(ncols, "target"), tuple(ops))
+        return tuple(ops)
 
     def transform(self, x_flat: np.ndarray, ncols: int, alpha: np.ndarray) -> np.ndarray:
-        """Row k: alpha[k] x term k on its source block of the flattened (D, ncols) state ``x_flat``, in the layout's order;
-        alpha rides on the first step's matrix (d^2 multiplications) rather than on the block."""
-        lay = self.layout(ncols)
+        """Row k: alpha[k] x term k on its source block of the flattened (D, ncols) state ``x_flat``, in the layout's order."""
+        return self.steps(x_flat[self.layout(ncols).gather], ncols, alpha)
+
+    def steps(self, y: np.ndarray, ncols: int, alpha: np.ndarray) -> np.ndarray:
+        """Row k: alpha[k] x term k on its gathered source block ``y`` (row k, in the layout's order); alpha rides on the
+        first step's matrix (d^2 multiplications) rather than on the block."""
         k = self.k
-        y: np.ndarray = x_flat[lay.gather]
-        for s, (code, lead, d, trail) in enumerate(lay.ops):
+        ops = self.ops(ncols)
+        for s, (code, lead, d, trail) in enumerate(ops):
             m = self.mats[s]
             if s == 0:
                 m = m * (alpha[:, None, None] if m.ndim == 3 else alpha[:, None])
@@ -333,9 +351,77 @@ class _Batch:
                 y = np.matmul(m[:, None], y.reshape(k, lead, d, trail))
             else:
                 y = y.reshape(k, lead, d, trail) * m[:, None, :, None]
-        if not lay.ops:
+        if not ops:
             y = y * (self.tail * alpha)[:, None]
         return y.reshape(k, -1)
+
+
+class _Single:
+    """A sum of one live term applied through views: its source block is a slice of the state (no index array), put in the
+    layout's order by a transpose, the batch's steps applied to it as two-dimensional products, and the result assigned into
+    the slice of the target block; the same elements multiplied in the same order as the batch's gather, steps and
+    scatter, with none of their per-term bookkeeping."""
+
+    __slots__ = ("_plans", "batch", "inverse", "perm", "position", "source", "target")
+
+    def __init__(self, batch: _Batch, position: int) -> None:
+        (term,) = batch.terms
+        dims = term.dims
+        self.batch = batch
+        self.position = position
+        source: list[int | slice] = [slice(None)] * (len(dims) + 1)
+        target: list[int | slice] = [slice(None)] * (len(dims) + 1)
+        for f, r, c in term.sliced:
+            source[f], target[f] = c, r
+        self.source = tuple(source)
+        self.target = tuple(target)
+        kept = [f for f in range(len(dims)) if f not in {s for s, _r, _c in term.sliced}] + [_COLUMNS]
+        self.perm = tuple(kept.index(f) for f in batch.orders[0])
+        self.inverse = tuple(int(i) for i in np.argsort(self.perm))
+        self._plans: dict[
+            int, tuple[tuple[int, ...], tuple[int, ...], tuple[tuple[str, int, int, int, np.ndarray], ...]]
+        ] = {}
+
+    def _plan(
+        self, ncols: int
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[tuple[str, int, int, int, np.ndarray], ...]]:
+        """(the state's tensor shape, the block's layout shape, every step with its one matrix) at ``ncols`` columns."""
+        plan = self._plans.get(ncols)
+        if plan is None:
+            batch = self.batch
+            state = batch.terms[0].dims + (ncols,)
+            layout = tuple(ncols if n == _COLUMNS else n for n in batch.shape)
+            steps = tuple((*op, m[0]) for op, m in zip(batch.ops(ncols), batch.mats))
+            plan = (state, layout, steps)
+            self._plans[ncols] = plan
+        return plan
+
+    def apply(self, x: np.ndarray, alpha: complex) -> np.ndarray:
+        """alpha x the term @ x for a C-contiguous complex (D, ncols) ``x``: a new (D, ncols) array."""
+        ncols = x.shape[1]
+        state, layout, steps = self._plan(ncols)
+        y = np.ascontiguousarray(x.reshape(state)[self.source].transpose(self.perm))
+        first = True
+        for code, lead, d, trail, m in steps:
+            if first:
+                m = m * alpha
+                first = False
+            if code == "left":
+                y = m @ y.reshape(d, trail)
+            elif code == "right":
+                y = y.reshape(lead, d) @ m
+            elif code == "middle":
+                y = np.matmul(m, y.reshape(lead, d, trail))
+            else:
+                y = y.reshape(lead, d, trail) * m[None, :, None]
+        if first:
+            y = y * (self.batch.tail[0] * alpha)
+        result = y.reshape(layout).transpose(self.inverse)
+        if not self.batch.terms[0].sliced:
+            return np.ascontiguousarray(result).reshape(-1, ncols)
+        out = np.zeros(state, dtype=complex)
+        out[self.target] = result
+        return out.reshape(-1, ncols)
 
 
 class _Scatter(NamedTuple):
@@ -358,7 +444,7 @@ class FactorizedSum:
     non-zero element) contributes nothing.
     """
 
-    __slots__ = ("_batches", "_runs", "_scatters", "d", "dims", "n_terms")
+    __slots__ = ("_batches", "_runs", "_scatters", "_single", "d", "dims", "n_terms")
 
     def __init__(self, operators: Sequence[FactorizedOperator]) -> None:
         if not operators:
@@ -391,6 +477,10 @@ class FactorizedSum:
             covered[tgt] = True
         self._runs = tuple(tuple(run) for run in runs)
         self._scatters: dict[int, tuple[_Scatter, ...]] = {}
+        self._single: _Single | None = None
+        if len(where) == 1:
+            ((batch, (k,)),) = self._batches
+            self._single = _Single(batch, int(k))
 
     def _scatter_plan(self, ncols: int) -> tuple[_Scatter, ...]:
         plan = self._scatters.get(ncols)
@@ -419,6 +509,8 @@ class FactorizedSum:
 
     def apply(self, x: np.ndarray, coefs: np.ndarray) -> np.ndarray:
         """sum_k coefs[k] A_k @ x for a C-contiguous complex (D, ncols) ``x``: a new (D, ncols) array."""
+        if self._single is not None:
+            return self._single.apply(x, complex(coefs[self._single.position]))
         ncols = x.shape[1]
         flat = x.reshape(-1)
         rows = [bt.transform(flat, ncols, coefs[ks]) for bt, ks in self._batches]
