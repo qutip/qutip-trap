@@ -404,7 +404,8 @@ class _Single:
         first = True
         for code, lead, d, trail, m in steps:
             if first:
-                m = m * alpha
+                if alpha != 1.0:  # QuTiP's dispatch passes scale 1 and applies the coefficient itself
+                    m = m * alpha
                 first = False
             if code == "left":
                 y = m @ y.reshape(d, trail)

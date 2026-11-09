@@ -308,37 +308,45 @@ _register_data_type()
 class RotatingDrive:
     """The ``QobjEvo`` function element t -> Qobj of the rotating-frame value of a sum of ``[operator, coefficient]`` terms:
     the builder's coefficients evaluated at t over the operators' data with the frame's phase vector, every term times
-    ``scale``."""
+    ``scale``. With no frame (``frame=None``, ``dims`` then given) it is the Schroedinger-picture value of the same sum:
+    the terms still apply through one :class:`SumProgram`, the factorized ones as one batch, instead of one dispatch each."""
 
     def __init__(
         self,
-        frame: FrameEnergies,
+        frame: FrameEnergies | None,
         operators: Sequence[Data],
         coefficients: Sequence[object],
         scale: complex = 1.0,
+        *,
+        dims: Sequence[int] | None = None,
     ) -> None:
         if len(operators) != len(coefficients):
             raise ValueError("one coefficient per operator")
+        if frame is None and dims is None:
+            raise ValueError("a drive without a frame names its space's dims")
         self.frame = frame
+        self.dims = tuple(int(d) for d in (dims if dims is not None else frame.dims))  # type: ignore[union-attr]
+        if frame is not None and frame.dims != self.dims:
+            raise ValueError("the dims are the frame's")
         self.operators = tuple(operators)
         self.coefficients = tuple(coefficients)
         self.scale = complex(scale)
-        n = frame.dimension
+        self._n = _prod(self.dims)
         for op in self.operators:
-            if op.shape != (n, n):
-                raise ValueError(f"operator of shape {op.shape} on a space of dimension {n}")
-        d = list(frame.dims)
+            if op.shape != (self._n, self._n):
+                raise ValueError(f"operator of shape {op.shape} on a space of dimension {self._n}")
+        d = list(self.dims)
         # parsed once: Qobj(data, dims=[d, d]) re-parses the nested lists at every call
         self._qdims = Dimensions([d, d])
         self._program = SumProgram(self.operators)
         self._qobj: qt.Qobj | None = None
 
     def __call__(self, t: float, **_: object) -> qt.Qobj:
-        theta = self.frame.theta(t)
+        theta = None if self.frame is None else self.frame.theta(t)
         values = np.array([c(t) for c in self.coefficients], dtype=np.complex128)  # type: ignore[operator]
         if self.scale != 1.0:
             values *= self.scale
-        data = PhasedSum._unchecked(self.frame.dims, self._program, values, theta, self.frame.dimension)
+        data = PhasedSum._unchecked(self.dims, self._program, values, theta, self._n)
         # one Qobj per element, refilled through the data setter: QuTiP's element machinery reads the returned data before
         # the next call, so a caller that keeps the returned Qobj must copy it
         qobj = self._qobj
@@ -350,7 +358,31 @@ class RotatingDrive:
         return qobj
 
     def __reduce__(self) -> tuple[object, ...]:
-        return (RotatingDrive, (self.frame, self.operators, self.coefficients, self.scale))
+        return (_rebuild_drive, (self.frame, self.operators, self.coefficients, self.scale, self.dims))
+
+
+def _rebuild_drive(
+    frame: FrameEnergies | None,
+    operators: Sequence[Data],
+    coefficients: Sequence[object],
+    scale: complex,
+    dims: Sequence[int],
+) -> RotatingDrive:
+    return RotatingDrive(frame, operators, coefficients, scale, dims=dims)
+
+
+def batched_drive(H: qt.QobjEvo, dims: Sequence[int]) -> qt.QobjEvo:
+    """``H`` in the Schroedinger picture with its ``[operator, coefficient]`` terms in one :class:`RotatingDrive` element
+    without a frame, so that its factorized drive terms apply as one batch; ``H`` itself when it holds fewer than two
+    factorized terms or a function element."""
+    parts = _split_terms(H)
+    if parts is None:
+        return H
+    const, evo = parts
+    if sum(isinstance(q.data, FactorizedOperator) for q, _c in evo) < 2:
+        return H
+    drive = qt.QobjEvo(RotatingDrive(None, [q.data for q, _c in evo], [c for _q, c in evo], dims=dims))
+    return drive if const is None else qt.QobjEvo(const) + drive
 
 
 @dataclass(frozen=True)
