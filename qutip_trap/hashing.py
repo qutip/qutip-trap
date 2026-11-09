@@ -9,6 +9,7 @@ excluded. A field with ``metadata={"hash": "exclude"}`` is left out (``Device.ro
 from __future__ import annotations
 
 import dataclasses
+import functools
 import hashlib
 import inspect
 import math
@@ -43,9 +44,47 @@ def _callable_token(fn: Callable[..., Any]) -> str:
     return f"callable:{name}:{hashlib.sha256(src.encode()).hexdigest()}"
 
 
+def _feed_float(h: Any, obj: float) -> None:
+    h.update(f"f{canonical_float(obj)};".encode())
+
+
+def _feed_str(h: Any, obj: str) -> None:
+    h.update(f"s{len(obj)}:".encode())
+    h.update(obj.encode())
+    h.update(b";")
+
+
+def _feed_sequence(h: Any, obj: tuple[object, ...] | list[object]) -> None:
+    h.update(f"t{len(obj)}(".encode())
+    for item in obj:
+        _feed(h, item)
+    h.update(b");")
+
+
+@functools.cache
+def _hashed_fields(cls: type) -> tuple[str, ...]:
+    """The names of a dataclass's fields that enter its digest, in declaration order."""
+    return tuple(f.name for f in dataclasses.fields(cls) if f.metadata.get("hash") != "exclude")
+
+
+_EXACT: dict[type, Callable[[Any, Any], None]] = {
+    type(None): lambda h, _obj: h.update(b"N;"),
+    bool: lambda h, obj: h.update(b"T;" if obj else b"F;"),
+    int: lambda h, obj: h.update(f"i{obj};".encode()),
+    float: _feed_float,
+    str: _feed_str,
+    tuple: _feed_sequence,
+    list: _feed_sequence,
+}
+"""The writers of the commonest exact types, the ones the chain in ``_feed`` reaches for them, looked up before it."""
+
+
 def _feed(h: Any, obj: object) -> None:
     """Write the canonical form of ``obj`` into the hash object ``h``."""
-    if obj is None:
+    exact = _EXACT.get(type(obj))
+    if exact is not None:
+        exact(h, obj)
+    elif obj is None:
         h.update(b"N;")
     elif isinstance(obj, bool):
         h.update(b"T;" if obj else b"F;")
@@ -56,9 +95,7 @@ def _feed(h: Any, obj: object) -> None:
     elif isinstance(obj, complex):
         h.update(f"c{canonical_float(obj.real)},{canonical_float(obj.imag)};".encode())
     elif isinstance(obj, str):
-        h.update(f"s{len(obj)}:".encode())
-        h.update(obj.encode())
-        h.update(b";")
+        _feed_str(h, obj)
     elif isinstance(obj, bytes):
         h.update(f"b{len(obj)}:".encode())
         h.update(obj)
@@ -74,11 +111,9 @@ def _feed(h: Any, obj: object) -> None:
         h.update(b"Q;")
     elif dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         h.update(f"D{type(obj).__qualname__}(".encode())
-        for f in dataclasses.fields(obj):
-            if f.metadata.get("hash") == "exclude":
-                continue
-            h.update(f"{f.name}=".encode())
-            _feed(h, getattr(obj, f.name))
+        for name in _hashed_fields(type(obj)):
+            h.update(f"{name}=".encode())
+            _feed(h, getattr(obj, name))
         h.update(b");")
     elif isinstance(obj, Mapping):
         h.update(f"m{len(obj)}(".encode())
@@ -93,10 +128,7 @@ def _feed(h: Any, obj: object) -> None:
             _feed(h, item)
         h.update(b");")
     elif isinstance(obj, (tuple, list)):
-        h.update(f"t{len(obj)}(".encode())
-        for item in obj:
-            _feed(h, item)
-        h.update(b");")
+        _feed_sequence(h, obj)
     elif callable(obj):
         h.update(_callable_token(obj).encode())
         h.update(b";")
