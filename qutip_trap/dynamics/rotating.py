@@ -27,7 +27,7 @@ from qutip.core import data as _data
 from qutip.core.data import Data, Dense
 from qutip.core.dimensions import Dimensions
 
-from qutip_trap.dynamics.kernels import FactorizedOperator, _prod
+from qutip_trap.dynamics.kernels import FactorizedOperator, FactorizedSum, _prod
 
 # ---- the frame's energies -----------------------------------------------------------------------------------------------------
 
@@ -147,12 +147,45 @@ def eigen_frequency(op: qt.Qobj, energies: np.ndarray) -> float | None:
 # ---- the data-layer operator -----------------------------------------------------------------------------------------------------
 
 
+class SumProgram:
+    """How a fixed list of operator data is applied as sum_k c_k A_k, decided once for the list: the factorized operators as
+    one :class:`~qutip_trap.dynamics.kernels.FactorizedSum` (their positions in ``factorized``), every other operator by
+    QuTiP's ``matmul`` into the same output, in list order after them."""
+
+    __slots__ = ("factorized", "fused", "operators", "others")
+
+    def __init__(self, operators: Sequence[Data]) -> None:
+        self.operators = tuple(operators)
+        positions = [k for k, op in enumerate(self.operators) if isinstance(op, FactorizedOperator)]
+        self.others = tuple(k for k in range(len(self.operators)) if k not in set(positions))
+        self.fused = FactorizedSum([self.operators[k] for k in positions]) if positions else None
+        # every operator factorized (the common case) reads the coefficient vector whole
+        self.factorized: np.ndarray | slice = (
+            slice(None) if len(positions) == len(self.operators) else np.array(positions, dtype=np.intp)
+        )
+
+    def apply(self, x: np.ndarray, values: np.ndarray) -> np.ndarray:
+        """sum_k values[k] A_k @ x for a C-contiguous complex (D, ncols) ``x``: a new (D, ncols) array."""
+        out = (
+            self.fused.apply(x, values[self.factorized])
+            if self.fused is not None
+            else np.zeros(x.shape, complex)
+        )
+        if self.others:
+            x_dense = Dense(x, copy=False)
+            out_dense = Dense(out, copy=False)
+            for k in self.others:
+                _data.iadd_dense(out_dense, _data.matmul(self.operators[k], x_dense, dtype=Dense), values[k])
+        return out
+
+
 class PhasedSum(Data):  # type: ignore[misc]
     """theta^* (sum_k c_k A_k) theta at one time: the rotating-frame value of a sum of drive terms.
 
     ``terms`` are (coefficient value, operator data) pairs, ``theta`` the unit-modulus phase vector e^{-i E t} of shape (D,)
-    or None for no phase. Applied matrix-free: the state is phased once, every term accumulates into one output and the
-    output is phased back. QuTiP converts it to Dense for anything but ``matmul`` on a Dense state.
+    or None for no phase. Applied matrix-free: the state is phased once, the terms apply through their :class:`SumProgram`
+    (the factorized ones together) into one output, and the output is phased back. QuTiP converts it to Dense for anything
+    but ``matmul`` on a Dense state.
     """
 
     def __init__(
@@ -163,12 +196,11 @@ class PhasedSum(Data):  # type: ignore[misc]
     ) -> None:
         self.dims = tuple(int(d) for d in dims)
         n = _prod(self.dims)
-        checked: list[tuple[complex, Data]] = []
-        for c, op in terms:
+        for _c, op in terms:
             if op.shape != (n, n):
                 raise ValueError(f"term of shape {op.shape} on a space of dimension {n}")
-            checked.append((complex(c), op))
-        self.terms: tuple[tuple[complex, Data], ...] = tuple(checked)
+        self.program = SumProgram([op for _c, op in terms])
+        self.values = np.array([complex(c) for c, _op in terms], dtype=complex)
         if theta is not None:
             theta = np.ascontiguousarray(theta, dtype=complex).reshape(-1)
             if theta.shape != (n,):
@@ -178,15 +210,27 @@ class PhasedSum(Data):  # type: ignore[misc]
 
     @classmethod
     def _unchecked(
-        cls, dims: tuple[int, ...], terms: tuple[tuple[complex, Data], ...], theta: np.ndarray | None, n: int
+        cls,
+        dims: tuple[int, ...],
+        program: SumProgram,
+        values: np.ndarray,
+        theta: np.ndarray | None,
+        n: int,
     ) -> PhasedSum:
-        """The constructor without the shape checks, for the per-evaluation path of :class:`RotatingDrive`."""
+        """The constructor without the checks, on a program built once, for the per-evaluation path of
+        :class:`RotatingDrive`."""
         self = cls.__new__(cls)
         self.dims = dims
-        self.terms = terms
+        self.program = program
+        self.values = values
         self.theta = theta
         Data.__init__(self, (n, n))
         return self
+
+    @property
+    def terms(self) -> tuple[tuple[complex, Data], ...]:
+        """(coefficient value, operator data) per term."""
+        return tuple((complex(c), op) for c, op in zip(self.values, self.program.operators))
 
     def to_array(self) -> np.ndarray:
         """The assembled matrix (conversions only; never on the propagation path)."""
@@ -214,17 +258,7 @@ class PhasedSum(Data):  # type: ignore[misc]
             x = self.theta[:, None] * a2
         else:
             x = np.ascontiguousarray(a2)
-        out = np.zeros(x.shape, dtype=complex)
-        x_dense: Dense | None = None
-        out_dense: Dense | None = None
-        for c, op in self.terms:
-            if isinstance(op, FactorizedOperator):
-                op._plan.apply_into(x, c, out)
-            else:
-                if x_dense is None:
-                    x_dense = Dense(x, copy=False)
-                    out_dense = Dense(out, copy=False)
-                _data.iadd_dense(out_dense, _data.matmul(op, x_dense, dtype=Dense), c)
+        out = self.program.apply(x, self.values)
         if self.theta is not None:
             np.multiply(out, np.conj(self.theta)[:, None], out=out)
         return out.reshape(-1) if vector else out
@@ -294,17 +328,15 @@ class RotatingDrive:
         d = list(frame.dims)
         # parsed once: Qobj(data, dims=[d, d]) re-parses the nested lists at every call
         self._qdims = Dimensions([d, d])
-        self._pairs = tuple(zip(self.coefficients, self.operators))
+        self._program = SumProgram(self.operators)
         self._qobj: qt.Qobj | None = None
 
     def __call__(self, t: float, **_: object) -> qt.Qobj:
         theta = self.frame.theta(t)
-        scale = self.scale
-        if scale == 1.0:
-            terms = tuple((complex(c(t)), op) for c, op in self._pairs)  # type: ignore[operator]
-        else:
-            terms = tuple((scale * complex(c(t)), op) for c, op in self._pairs)  # type: ignore[operator]
-        data = PhasedSum._unchecked(self.frame.dims, terms, theta, self.frame.dimension)
+        values = np.array([c(t) for c in self.coefficients], dtype=np.complex128)  # type: ignore[operator]
+        if self.scale != 1.0:
+            values *= self.scale
+        data = PhasedSum._unchecked(self.frame.dims, self._program, values, theta, self.frame.dimension)
         # one Qobj per element, refilled through the data setter: QuTiP's element machinery reads the returned data before
         # the next call, so a caller that keeps the returned Qobj must copy it
         qobj = self._qobj

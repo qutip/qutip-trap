@@ -14,7 +14,7 @@ from qutip_trap.calibration.entangling import ms_schedule
 from qutip_trap.control.table import Waveform
 from qutip_trap.dynamics.engine import JointExactEngine, SeedSpec
 from qutip_trap.dynamics.hamiltonian import BuilderOptions, build_hamiltonian
-from qutip_trap.dynamics.kernels import FactorizedOperator, factorized_qobj
+from qutip_trap.dynamics.kernels import FactorizedOperator, FactorizedSum, factorized_qobj
 from qutip_trap.dynamics.operators import displacement_operator, qudit_sigma_plus, qudit_sigma_z
 from qutip_trap.dynamics.rotating import (
     FrameEnergies,
@@ -314,22 +314,45 @@ def test_engine_rotating_frame_on_the_trajectory_path_matches_per_trajectory(ms_
         assert np.max(np.abs(finals[True][3][key] - finals[False][3][key])) < 1e-6
 
 
-def test_kernel_apply_into_accumulates_and_matches_apply() -> None:
+def test_a_factorized_sum_applies_its_terms_at_once_in_their_order() -> None:
+    """Every term kind at once (the sigma_+ and sigma_- of two ions over two mode factors, a diagonal ion factor, one mode
+    factor, a bare slice, a zero factor): the sum equals the assembled sum to 1e-13 on one column and on three, the terms of
+    one arrangement share a batch, and it equals the term-by-term sum element for element (the contributions arrive in the
+    terms' order)."""
     dims = (2, 2, 5, 6)
     n = int(np.prod(dims))
     d1 = displacement_operator(5, 0.2j).full()
     d2 = displacement_operator(6, 0.1j).full()
-    op = FactorizedOperator(dims, {1: qudit_sigma_plus(2).full(), 2: d1, 3: d2}, 0.4 - 0.1j)
-    x = _random_vector(n, 8, ncols=2)
-    out = _random_vector(n, 9, ncols=2)
-    expected = out + (0.7 + 0.2j) * (op.to_array() @ x)
-    op._plan.apply_into(np.ascontiguousarray(x), 0.7 + 0.2j, out)
-    assert np.max(np.abs(out - expected)) < 1e-13
-    assert np.max(np.abs(op.apply(x) - op.to_array() @ x)) < 1e-13
+    d1b = displacement_operator(5, -0.15j).full()
+    sp = qudit_sigma_plus(2).full()
+    up = FactorizedOperator(dims, {0: sp, 2: d1, 3: d2}, 0.4 - 0.1j)
+    up1 = FactorizedOperator(dims, {1: sp, 2: d1b, 3: d2}, 1.1)
+    ops = [
+        up,
+        up.adjoint(),
+        up1,
+        up1.adjoint(),
+        FactorizedOperator(dims, {1: np.diag([0.3, 2.3]), 2: d1, 3: d2}),
+        FactorizedOperator(dims, {0: sp, 3: d2}, 0.7j),
+        FactorizedOperator(dims, {1: sp}, 2.0j),
+        FactorizedOperator(dims, {0: np.zeros((2, 2)), 2: d1}),
+    ]
+    coefs = np.array([0.7 + 0.2j, 0.7 - 0.2j, -0.3j, 0.3j, 0.25, 1.5 - 0.5j, 0.5, 9.0], dtype=complex)
+    fused = FactorizedSum(ops)
+    assert [b.k for b, _ks in fused._batches][:1] == [4], (
+        "the four drive terms of the register share one batch"
+    )
+    for ncols in (1, 3):
+        x = np.ascontiguousarray(_random_vector(n, 8, ncols=ncols).reshape(n, ncols))
+        expected = sum(c * (op.to_array() @ x) for c, op in zip(coefs, ops))
+        got = fused.apply(x, coefs)
+        assert got.shape == (n, ncols) and np.max(np.abs(got - expected)) < 1e-13, ncols
+        loop = np.zeros((n, ncols), dtype=complex)
+        for c, op in zip(coefs, ops):
+            loop += op.apply(x, c)
+        assert np.array_equal(got, loop), ncols
     # a pure slice (no mode factor) still carries its prefactor
-    bare = FactorizedOperator((2, 3), {0: qudit_sigma_plus(2).full()}, 2.0j)
+    bare = FactorizedOperator((2, 3), {0: sp}, 2.0j)
     v = _random_vector(6, 10)
     assert np.max(np.abs(bare.apply(v) - bare.to_array() @ v)) < 1e-14
-    acc = np.zeros((6, 1), dtype=complex)
-    bare._plan.apply_into(np.ascontiguousarray(v.reshape(-1, 1)), 0.5, acc)
-    assert np.max(np.abs(acc.ravel() - 0.5 * (bare.to_array() @ v))) < 1e-14
+    assert np.max(np.abs(bare.apply(v, 0.5) - 0.5 * (bare.to_array() @ v))) < 1e-14

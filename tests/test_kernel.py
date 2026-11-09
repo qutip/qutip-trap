@@ -19,7 +19,7 @@ from qutip_trap.dynamics.engine import JointExactEngine, SeedSpec
 from qutip_trap.dynamics.hamiltonian import BuilderOptions, build_hamiltonian
 from qutip_trap.dynamics.kernels import (
     FactorizedOperator,
-    _ApplicationPlan,
+    _Batch,
     factorized_qobj,
     kernel_costs_us,
     prefer_factorized,
@@ -440,18 +440,18 @@ def test_section_11_1_rows_factorized_against_assembled_final_states_and_cost(mo
     of the reference machine's, and the crossover holds."""
     plan_calls = [0]
     assemblies = [0]
-    transform = _ApplicationPlan._transform
+    transform = _Batch.transform
     to_array = FactorizedOperator.to_array
 
-    def counted_transform(plan, *args, **kwargs):
+    def counted_transform(batch, *args, **kwargs):
         plan_calls[0] += 1
-        return transform(plan, *args, **kwargs)
+        return transform(batch, *args, **kwargs)
 
     def counted_to_array(op):
         assemblies[0] += 1
         return to_array(op)
 
-    monkeypatch.setattr(_ApplicationPlan, "_transform", counted_transform)
+    monkeypatch.setattr(_Batch, "transform", counted_transform)
     monkeypatch.setattr(FactorizedOperator, "to_array", counted_to_array)
     walls: dict[tuple[int, int, bool], float] = {}
     per_eval: dict[tuple[int, int, bool], float] = {}
@@ -493,9 +493,9 @@ def test_section_11_1_rows_factorized_against_assembled_final_states_and_cost(mo
                 # an application slices the ion factor and runs one dense product per mode factor on the D/2 amplitudes
                 # of the source level
                 for term in (el[0].data for el in h.to_list() if isinstance(el, list)):
-                    steps = term._plan.steps
-                    assert [kind for kind, *_rest in steps] == ["dense"] * nmodes, (nmodes, nmax)
-                    macs = sum(lead * d * d * trail for _kind, lead, d, trail, *_mats in steps)
+                    assert [kind for _f, kind, _m in term.term.steps] == ["dense"] * nmodes, (nmodes, nmax)
+                    ops = _Batch([term.term]).layout(1).ops
+                    macs = sum(lead * d * d * trail for _code, lead, d, trail in ops)
                     assert macs == psi0.shape[0] // 2 * nmodes * nmax, (nmodes, nmax, macs)
         assert (finals[True] - finals[False]).norm() < 2e-7, (nmodes, nmax)
         n_ref, us_fact, us_csr = REFERENCE_ROWS[(nmodes, nmax)]
