@@ -140,7 +140,8 @@ def test_the_joint_exact_guess_integrates_each_segment_once(machine) -> None:
     """Section 11.2 at JOINT_EXACT: the Bell circuit's 15 pulses are the engine's 10 integrated segments, the MS gate's
     five, each playing both ions' pulses at once, and the five carrier pulses, each costing a + (seconds per evaluation) x
     the evaluations of its duration; every segment drives four terms (sigma_+ D and its conjugate on each ion, a carrier's
-    on its ion and its crosstalk neighbour), held factorized at dimension 572 as one batch."""
+    on its ion and its crosstalk neighbour), held factorized at dimension 572 as one batch, beside the evaluation's own
+    cost."""
     _preset, m = machine
     est = m.estimate(BELL)
     sched = m.schedule(BELL)
@@ -148,7 +149,7 @@ def test_the_joint_exact_guess_integrates_each_segment_once(machine) -> None:
     assert len(sched.pulses) == 15 and len(segments) == 10
     assert sorted(len(active) for _duration, active in segments) == [1] * 5 + [2] * 5
     per_evaluation = _evaluation_cost_s(est.space.dims, [0, 1], [2, 3])
-    assert est.dimension == 572 and per_evaluation == pytest.approx(10.61e-6, rel=0.01)
+    assert est.dimension == 572 and per_evaluation == pytest.approx(20.61e-6, rel=0.01)
     assert est.wall_time_s == pytest.approx(
         sum(_segment_cost_s(per_evaluation, duration) for duration, _active in segments), rel=1e-12
     )
@@ -177,7 +178,7 @@ def test_the_evaluations_per_pulse_second_are_what_the_engine_counts(machine, mo
 @pytest.mark.heavy  # a wall time against the cost model: measured alone, never beside other workers
 def test_the_wall_time_guess_against_the_measured_integration(machine) -> None:
     """Section 11.2's guess for the Bell circuit against the engine's timing of one pass (the first branch's segments):
-    1.55 s against 1.07 s on the reference machine, within a factor of three either way."""
+    0.83 s against 0.94 s on the reference machine, within a factor of three either way."""
     _preset, m = machine
     est = m.estimate(BELL)
     measured = sum(last_record(m.run(BELL, 20)).traces[0].wall_time_s.values())

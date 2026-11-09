@@ -29,14 +29,18 @@ if TYPE_CHECKING:
 
 COST_FIXED_S = 0.02
 """Section 11.2's fitted per-segment constant a of cost = a + (seconds per evaluation) x evaluations."""
+COST_EVALUATION_US = 10.0
+"""What a right-hand-side evaluation costs besides its drive terms (us): the frame's phase vector, the coefficients, QuTiP's
+element dispatch and the integrator's own stage arithmetic, measured as the evaluation's 22 us less its drive terms' 12 us
+on the Bell circuit's MS segments of ``presets.yb171_chain(2)`` (dimension 572)."""
 EVALUATIONS_PER_PULSE_SECOND = 2.8e8
 """Right-hand-side evaluations per second of pulse the engine makes in its exact rotating frame, with dop853 at atol 1e-10
 and rtol 1e-8, counted on QuTiP's dop853 right-hand side: 1.9 to 3.2 x 10^8 over the segments of the Bell circuit on
 ``presets.yb171_chain(2)`` (dimension 572: 3.2e8 on its 20 us MS segments, 2.3e8 on its 1.7 us carrier pulses), the
 three-ion GHZ circuit (1144: 2.7e8 and 2.0e8) and the four-ion row-2b Bell pair (2304: 2.5e8 and 1.9e8), where the
-Schroedinger picture needs 3 to 8 times more (Section 11.2). With the kernel costs of ``dynamics.kernels`` per evaluation
-the guess is 1.4, 1.8 and 2.1 times the measured integration of one pass through those runs on an 18-CPU Apple machine
-(1.55 s against 1.07 s, 4.19 against 2.37, 3.28 against 1.54)."""
+Schroedinger picture needs 3 to 8 times more (Section 11.2). With the kernel costs of ``dynamics.kernels`` and
+``COST_EVALUATION_US`` per evaluation the guess is 0.88, 0.85 and 1.09 times the measured integration of one pass through
+those runs on an 18-CPU Apple machine (0.83 s against 0.94 s, 2.18 against 2.56, 1.63 against 1.49)."""
 
 
 @dataclass(frozen=True)
@@ -56,7 +60,7 @@ class Estimate:
     duration_s: float
     """The schedule's length, seconds."""
     wall_time_s: float
-    """Section 11.2's cost of one pass through the schedule (``_wall_time_guess``), seconds: 1.4 to 2.1 times the measured
+    """Section 11.2's cost of one pass through the schedule (``_wall_time_guess``), seconds: 0.85 to 1.1 times the measured
     integration on the runs ``EVALUATIONS_PER_PULSE_SECOND`` is counted on, and the order of a run's wall time when its
     branches and samples fit on the workers at once."""
     notes: tuple[str, ...] = ()
@@ -72,15 +76,15 @@ class Estimate:
 
 
 def _evaluation_cost_s(dims: Sequence[int], ion_factors: Sequence[int], mode_factors: Sequence[int]) -> float:
-    """Seconds per right-hand-side evaluation of the drive terms on the ions at ``ion_factors`` of a space of ``dims``: two
-    per ion (sigma_+^i (x) prod_m D_m over ``mode_factors`` and its conjugate), each ion's held in the kernel the builder's
-    ``auto`` rule picks for it (``dynamics.kernels.prefer_factorized``), the factorized ones as one batch and the assembled
-    ones as CSR products (``dynamics.kernels.kernel_costs_us``)."""
+    """Seconds per right-hand-side evaluation with the drive terms on the ions at ``ion_factors`` of a space of ``dims``:
+    ``COST_EVALUATION_US`` plus two terms per ion (sigma_+^i (x) prod_m D_m over ``mode_factors`` and its conjugate), each
+    ion's held in the kernel the builder's ``auto`` rule picks for it (``dynamics.kernels.prefer_factorized``), the
+    factorized ones as one batch and the assembled ones as CSR products (``dynamics.kernels.kernel_costs_us``)."""
     from qutip_trap.dynamics.kernels import kernel_costs_us, prefer_factorized
 
     factorized = [f for f in ion_factors if prefer_factorized(dims, f, mode_factors)]
     assembled = [f for f in ion_factors if not prefer_factorized(dims, f, mode_factors)]
-    total_us = 0.0
+    total_us = COST_EVALUATION_US
     if assembled:
         total_us += kernel_costs_us(dims, assembled, mode_factors)[0]
     if factorized:

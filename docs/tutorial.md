@@ -299,7 +299,7 @@ out take about 20 µs a shot. A few thousand shots add hundredths of a second; 2
 
 The surrogate cache lives in the Python session. Its key is the device, the beam roles, the run's `seed`, the
 `Numerics`, the `Physics` and the pairs the circuit entangles. So a machine without a table **recalibrates whenever
-you change the seed or the numerics**, several seconds each time on two ions. Pin a table once before any sweep:
+you change the seed or the numerics**, a couple of seconds each time on two ions. Pin a table once before any sweep:
 
 ```python
 pinned = machine.calibrated(pairs=[(0, 1)])   # reuses the cached surrogate of the first run

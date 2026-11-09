@@ -400,10 +400,10 @@ def _counted_coefficient(t: float, Om: float, mu: float, tag: object = None) -> 
 # per evaluation) on the reference machine. The evaluation counts are set by the integrator's arithmetic; the costs are
 # the machine's, so only their ratio is compared.
 REFERENCE_ROWS = {
-    (1, 12): (19283, 13.2, 1.9),
-    (2, 8): (21067, 21.5, 16.7),
-    (3, 6): (24366, 45.4, 195.2),
-    (3, 8): (35177, 89.5, 1207.9),
+    (1, 12): (19283, 11.9, 1.9),
+    (2, 8): (21067, 22.5, 16.8),
+    (3, 6): (24366, 36.8, 195.2),
+    (3, 8): (35177, 58.3, 1206.9),
 }
 
 
