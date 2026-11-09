@@ -157,21 +157,25 @@ def test_hilbert_space_factorized_drive_operator_is_the_assembled_one_and_refuse
 
 
 def test_cost_model_reproduces_the_measured_crossover_of_section_11_1() -> None:
-    """The cost model assembles at dimensions 48 and 256 and factorizes from the 440-dimensional Bell space up, never without a
-    mode factor; the assembled cost at 2048 is 0.5 + 0.57e-3 x nnz us."""
+    """The cost model holds a single mode of a few dozen states assembled and factorizes every space with two resolved
+    modes or more, from the 144-dimensional (2, 2, 6, 6) up, never without a mode factor; a register's batch costs its
+    gathered elements, and the assembled cost at 2048 is the per-term and per-non-zero formula."""
     assert not prefer_factorized((2, 2, 12), 0, [2])
-    assert not prefer_factorized((2, 2, 8, 8), 0, [2, 3])
-    assert prefer_factorized((2, 2, 10, 11), 0, [2, 3])
+    assert not prefer_factorized((2, 2, 20), 0, [2])
+    assert prefer_factorized((2, 2, 6, 6), 0, [2, 3])
+    assert prefer_factorized((2, 2, 8, 10), 0, [2, 3])
     assert prefer_factorized((2, 2, 6, 6, 6), 0, [2, 3, 4])
     assert prefer_factorized((2, 2, 8, 8, 8), 0, [2, 3, 4])
     assert prefer_factorized((2, 2, 2, 2, 8, 8, 8), 3, [4, 5, 6])
     assert not prefer_factorized((2, 2, 8, 8, 8), 0, []), (
         "a carrier on an all-frozen space has no mode factor"
     )
-    a48, f48 = kernel_costs_us((2, 2, 12), 0, [2])
-    a2048, f2048 = kernel_costs_us((2, 2, 8, 8, 8), 0, [2, 3, 4])
+    a48, f48 = kernel_costs_us((2, 2, 12), [0], [2])
+    a2048, f2048 = kernel_costs_us((2, 2, 8, 8, 8), [0, 1], [2, 3, 4])
     assert a48 < f48 and f2048 < a2048 / 10.0
-    assert a2048 == pytest.approx(0.5 + 0.57e-3 * 524288, rel=1e-12)
+    assert a2048 == pytest.approx(2.41 + 4 * (0.25 + 0.45e-3 * 1024 * 512), rel=1e-12)
+    # two products of the middle mode per level of the leading mode and the other ion, per term
+    assert f2048 == pytest.approx(3.21 + 6.47e-3 * 4 * 1024 + 0.086 * 4 * 8 * 2, rel=1e-12)
 
 
 @pytest.fixture(scope="module")

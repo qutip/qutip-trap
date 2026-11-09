@@ -73,15 +73,18 @@ class Estimate:
 
 def _evaluation_cost_s(dims: Sequence[int], ion_factors: Sequence[int], mode_factors: Sequence[int]) -> float:
     """Seconds per right-hand-side evaluation of the drive terms on the ions at ``ion_factors`` of a space of ``dims``: two
-    per ion (sigma_+^i (x) prod_m D_m over ``mode_factors`` and its conjugate), each at the kernel the builder's ``auto``
-    rule holds it in (``dynamics.kernels.kernel_costs_us``: the factorized application where it is the cheaper, the
-    assembled CSR product otherwise and on a space without resolved modes)."""
-    from qutip_trap.dynamics.kernels import kernel_costs_us
+    per ion (sigma_+^i (x) prod_m D_m over ``mode_factors`` and its conjugate), each ion's held in the kernel the builder's
+    ``auto`` rule picks for it (``dynamics.kernels.prefer_factorized``), the factorized ones as one batch and the assembled
+    ones as CSR products (``dynamics.kernels.kernel_costs_us``)."""
+    from qutip_trap.dynamics.kernels import kernel_costs_us, prefer_factorized
 
+    factorized = [f for f in ion_factors if prefer_factorized(dims, f, mode_factors)]
+    assembled = [f for f in ion_factors if not prefer_factorized(dims, f, mode_factors)]
     total_us = 0.0
-    for f in ion_factors:
-        assembled, factorized = kernel_costs_us(dims, f, mode_factors)
-        total_us += 2.0 * (min(assembled, factorized) if mode_factors else assembled)
+    if assembled:
+        total_us += kernel_costs_us(dims, assembled, mode_factors)[0]
+    if factorized:
+        total_us += kernel_costs_us(dims, factorized, mode_factors)[1]
     return 1e-6 * total_us
 
 

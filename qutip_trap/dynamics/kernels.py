@@ -8,9 +8,11 @@ Anything else converts to Dense through QuTiP's conversion graph, which assemble
 segment builds the assembled CSR operator). The factors are the per-mode exponentials the space oracle-checks; an ENR
 group's sum-generator exponential is not a product, so a drive on an ENR mode is never factorized.
 
-The ``auto`` choice of ``BuilderOptions.kernel`` is the cost model below, fitted through ``QobjEvo.matmul`` over spaces
-of dimension 48 to 8192: an assembled term costs its non-zeros at 0.57 ns, a factorized one a fixed dispatch cost plus a
-call and a batched product per factor; on the two-ion benchmark fixture the crossover lies between dimensions 256 and 440.
+The ``auto`` choice of ``BuilderOptions.kernel`` is the cost model below, fitted through ``PhasedSum.apply`` (the rotating
+frame's right-hand side) over the sigma_+ and sigma_- terms of one to four ions on spaces of dimension 24 to 2048: the
+assembled terms cost their non-zeros at 0.45 ns (0.59 ns per stored one), the factorized ones the elements of their gathered source blocks at
+6.5 ns (gather, two products and scatter) and every product of a middle mode factor; a factorized register is the cheaper
+on every space with two resolved modes or more, and the assembled one on a single mode below a few dozen states.
 """
 
 from __future__ import annotations
@@ -25,16 +27,20 @@ from qutip.core.data import Data, Dense
 
 KernelChoice = Literal["auto", "factorized", "assembled"]
 
-COST_CSR_US = 0.5
-"""Fixed cost of one assembled CSR term (us)."""
-COST_CSR_NS_PER_NNZ = 0.57
-"""A CSR product per non-zero (ns), memory-bound."""
-COST_TERM_US = 2.0
-"""Dispatch, allocation and the zero fill of the output per factorized term (us)."""
-COST_STEP_US = 2.5
-"""One batched matrix-product call per factor (us)."""
-COST_NS_PER_MAC = 0.6
-"""Per complex multiply-add of the batched products (ns)."""
+COST_ASSEMBLED_US = 2.41
+"""What an evaluation of assembled drive terms costs whatever their number (us): the phases, the zero fill, the dispatch."""
+COST_ASSEMBLED_TERM_US = 0.25
+"""Per assembled term (us)."""
+COST_ASSEMBLED_NS_PER_NNZ = 0.45
+"""Per non-zero of an assembled term (ns), counted as D prod_m d_m / d_ion: the CSR product's memory-bound rate (0.59 ns
+per stored non-zero) over the elements the conversion keeps."""
+COST_FACTORIZED_US = 3.21
+"""What an evaluation of factorized drive terms costs whatever their number (us): the phases and one batch's calls."""
+COST_FACTORIZED_NS_PER_ELEMENT = 6.47
+"""Per element of the terms' gathered source blocks (ns): the gather, the products of the leading and trailing mode factors
+and the scatter."""
+COST_FACTORIZED_MIDDLE_US = 0.086
+"""Per matrix product of a middle mode factor (us), one per level of the factors before it (three modes or more)."""
 
 
 def _prod(values: Sequence[int]) -> int:
@@ -44,28 +50,47 @@ def _prod(values: Sequence[int]) -> int:
     return out
 
 
-def kernel_costs_us(dims: Sequence[int], ion_factor: int, mode_factors: Sequence[int]) -> tuple[float, float]:
-    """(assembled CSR, factorized) microseconds per application of one drive term sigma_+^i (x) prod_m D_m on ``dims``.
+def _middle_products(dims: Sequence[int], ion_factor: int, mode_factors: Sequence[int]) -> int:
+    """The matrix products the middle mode factors of one term take in its block's layout (``_Term.order``): the first mode
+    leads, the last trails, and a middle one is applied once per level of every kept factor before it."""
+    modes = sorted(int(f) for f in mode_factors)
+    if len(modes) < 3:
+        return 0
+    first, last = modes[0], modes[-1]
+    between = [f for f in range(len(dims)) if f not in (ion_factor, first, last)]
+    return sum(int(dims[first]) * _prod([dims[f] for f in between if f < m]) for m in modes[1:-1])
 
-    The assembled term has D prod_m d_m / d_ion non-zeros; the factorized term applies each mode factor to the D/d_ion
-    amplitudes of the source level.
+
+def kernel_costs_us(
+    dims: Sequence[int], ion_factors: Sequence[int], mode_factors: Sequence[int]
+) -> tuple[float, float]:
+    """(assembled CSR, factorized) microseconds per evaluation of the drive terms sigma_+^i (x) prod_m D_m and their
+    conjugates of every ion factor i in ``ion_factors`` on ``dims``, all held one way.
+
+    An assembled term has D prod_m d_m / d_ion non-zeros; the factorized terms share one batch, which gathers the D/d_ion
+    amplitudes of each term's source level.
     """
     d = _prod(dims)
-    d_ion = int(dims[ion_factor])
-    block = d // d_ion
-    nnz = block * _prod([dims[f] for f in mode_factors])
-    assembled = COST_CSR_US + COST_CSR_NS_PER_NNZ * 1e-3 * nnz
-    factorized = COST_TERM_US + sum(
-        COST_STEP_US + COST_NS_PER_MAC * 1e-3 * block * dims[f] for f in mode_factors
+    modes_size = _prod([dims[f] for f in mode_factors])
+    blocks = [d // int(dims[f]) for f in ion_factors]
+    assembled = COST_ASSEMBLED_US + sum(
+        2.0 * (COST_ASSEMBLED_TERM_US + COST_ASSEMBLED_NS_PER_NNZ * 1e-3 * block * modes_size)
+        for block in blocks
+    )
+    factorized = (
+        COST_FACTORIZED_US
+        + COST_FACTORIZED_NS_PER_ELEMENT * 1e-3 * 2.0 * sum(blocks)
+        + COST_FACTORIZED_MIDDLE_US * 2.0 * sum(_middle_products(dims, f, mode_factors) for f in ion_factors)
     )
     return assembled, factorized
 
 
 def prefer_factorized(dims: Sequence[int], ion_factor: int, mode_factors: Sequence[int]) -> bool:
-    """The ``auto`` rule: factorize when the cost model says the factorized term is the cheaper one."""
+    """The ``auto`` rule for one ion's drive terms: factorize when the cost model says their factorized batch is the cheaper
+    (a register's batch of several ions only widens the margin)."""
     if not mode_factors:
         return False
-    assembled, factorized = kernel_costs_us(dims, ion_factor, mode_factors)
+    assembled, factorized = kernel_costs_us(dims, [ion_factor], mode_factors)
     return factorized < assembled
 
 

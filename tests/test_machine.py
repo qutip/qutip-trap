@@ -140,7 +140,7 @@ def test_the_joint_exact_guess_integrates_each_segment_once(machine) -> None:
     """Section 11.2 at JOINT_EXACT: the Bell circuit's 15 pulses are the engine's 10 integrated segments, the MS gate's
     five, each playing both ions' pulses at once, and the five carrier pulses, each costing a + (seconds per evaluation) x
     the evaluations of its duration; every segment drives four terms (sigma_+ D and its conjugate on each ion, a carrier's
-    on its ion and its crosstalk neighbour), held factorized at dimension 572."""
+    on its ion and its crosstalk neighbour), held factorized at dimension 572 as one batch."""
     _preset, m = machine
     est = m.estimate(BELL)
     sched = m.schedule(BELL)
@@ -148,7 +148,7 @@ def test_the_joint_exact_guess_integrates_each_segment_once(machine) -> None:
     assert len(sched.pulses) == 15 and len(segments) == 10
     assert sorted(len(active) for _duration, active in segments) == [1] * 5 + [2] * 5
     per_evaluation = _evaluation_cost_s(est.space.dims, [0, 1], [2, 3])
-    assert est.dimension == 572 and per_evaluation == pytest.approx(4 * 11.1e-6, rel=0.01)
+    assert est.dimension == 572 and per_evaluation == pytest.approx(10.61e-6, rel=0.01)
     assert est.wall_time_s == pytest.approx(
         sum(_segment_cost_s(per_evaluation, duration) for duration, _active in segments), rel=1e-12
     )
