@@ -33,6 +33,7 @@ from qutip_trap.control.pulses import ConstantFn, InterpFn, Pulse, ScaledFn
 from qutip_trap.control.schedule import stark_scaling_power
 from qutip_trap.device.model import Device
 from qutip_trap.dynamics.channels import CollapseOp, RecoilOption
+from qutip_trap.dynamics.coefficients import function_coefficient
 from qutip_trap.dynamics.operators import displacement_operator
 from qutip_trap.dynamics.space import HilbertSpace
 from qutip_trap.light.raman import (
@@ -290,7 +291,7 @@ def _make_op(ctx: _OpContext, matrix: np.ndarray, name: str) -> CollapseOp:
         full: qt.Qobj | qt.QobjEvo = (root_w * ctx.const_scale) * op
         rate = scale_rate * ctx.const_scale**2
     else:
-        full = qt.QobjEvo([root_w * op, qt.coefficient(_scale_coef, args={"scale": ctx.time_scale})])
+        full = qt.QobjEvo([root_w * op, function_coefficient(_scale_coef, {"scale": ctx.time_scale})])
         rate = scale_rate * float(ctx.time_scale(ctx.t_start)) ** 2
     # a scattering rate is already s^-1: no 2 pi
     return CollapseOp(full, float(rate), name, ctx.ion, None)

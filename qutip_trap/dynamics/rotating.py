@@ -27,6 +27,7 @@ from qutip.core import data as _data
 from qutip.core.data import Data, Dense
 from qutip.core.dimensions import Dimensions
 
+from qutip_trap.dynamics.coefficients import function_coefficient
 from qutip_trap.dynamics.kernels import FactorizedOperator, FactorizedSum, _prod
 
 # ---- the frame's energies -----------------------------------------------------------------------------------------------------
@@ -404,7 +405,7 @@ def rotating_collapse(op: qt.Qobj | qt.QobjEvo, frame: FrameEnergies) -> qt.Qobj
         return None
     if lam == 0.0:
         return op
-    return qt.QobjEvo([[op, qt.coefficient(_phase_coefficient, args={"lam": lam})]])
+    return qt.QobjEvo([[op, function_coefficient(_phase_coefficient, {"lam": lam})]])
 
 
 def rotating_frame(
