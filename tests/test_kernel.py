@@ -20,6 +20,7 @@ from qutip_trap.dynamics.hamiltonian import BuilderOptions, build_hamiltonian
 from qutip_trap.dynamics.kernels import (
     FactorizedOperator,
     _Batch,
+    _Single,
     factorized_qobj,
     kernel_costs_us,
     prefer_factorized,
@@ -444,18 +445,19 @@ def test_section_11_1_rows_factorized_against_assembled_final_states_and_cost(mo
     of the reference machine's, and the crossover holds."""
     plan_calls = [0]
     assemblies = [0]
-    transform = _Batch.transform
+    # QuTiP dispatches every term of this list-form QobjEvo on its own: each application is a lone term's
+    apply = _Single.apply
     to_array = FactorizedOperator.to_array
 
-    def counted_transform(batch, *args, **kwargs):
+    def counted_apply(single, *args, **kwargs):
         plan_calls[0] += 1
-        return transform(batch, *args, **kwargs)
+        return apply(single, *args, **kwargs)
 
     def counted_to_array(op):
         assemblies[0] += 1
         return to_array(op)
 
-    monkeypatch.setattr(_Batch, "transform", counted_transform)
+    monkeypatch.setattr(_Single, "apply", counted_apply)
     monkeypatch.setattr(FactorizedOperator, "to_array", counted_to_array)
     walls: dict[tuple[int, int, bool], float] = {}
     per_eval: dict[tuple[int, int, bool], float] = {}
