@@ -53,14 +53,19 @@ def test_knob_changes_submit_one_derive_and_land_in_the_store(
 
 
 def test_layer_result_and_recalibration_apply(
-    index: ProvenanceIndex, monkeypatch: pytest.MonkeyPatch, bell: tuple[Record, LiveRun]
+    index: ProvenanceIndex,
+    monkeypatch: pytest.MonkeyPatch,
+    bell: tuple[Record, LiveRun],
+    stability: device_layer.StabilityMap,
 ) -> None:
     record, live = bell
     session = Session(Store(), index)
     store = session.store
     monkeypatch.setattr(session.worker, "submit", lambda request, **payload: _Ticket(len(store.jobs) + 1))
     ref = store.device_ref()
-    layer = device_layer.derive_device_layer(record.job.device.build(), table=live.table, sweeps=False)
+    layer = device_layer.derive_device_layer(
+        record.job.device.build(), stability=stability, table=live.table, sweeps=False
+    )
     store.jobs = {"t1": JobStatus("t1", "derive", target={"cache_key": ref.cache_key()})}
     session.apply_events([Event("result", "t1", "derive", payload=layer)])
     assert store.layer() is layer and store.device_ref().hash == layer.device_hash

@@ -22,6 +22,7 @@ import traceback
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from qutip_trap_app import core, resim
@@ -81,6 +82,64 @@ class _LiveState:
     """Built presets per ``DeviceRef.cache_key()`` (a build with the recipe re-derived takes seconds)."""
     tables: dict[str, core.CalibrationTable] = field(default_factory=dict)
     """The latest calibration table per device hash (the device layer compares its solutions with it)."""
+    stability: layer_mod.StabilityMap | None = None
+    """The Mathieu stability boundary every device's trap page draws, computed by the first derive."""
+
+
+WARM_START_PATH = Path(__file__).resolve().with_name("warm_start.pkl")
+"""The warm start a packaged build ships, written by ``python -m qutip_trap_app.warm_start``."""
+
+
+@dataclass(frozen=True)
+class WarmStart:
+    """What a worker has derived that a later worker can start from: the built presets, their calibration (the core's
+    cached reports and the tables read from them), the channel libraries and the stability boundary. Every entry but
+    the boundary, which no device changes, is keyed by what it was derived from (the preset's arguments, the device hash,
+    the seed, the numerics), so a request for anything else derives its own."""
+
+    presets: dict[str, core.DevicePreset]
+    calibration: dict[str, object]
+    """The core's calibration reports by cache key (``core.CALIBRATION_CACHE``)."""
+    tables: dict[str, core.CalibrationTable]
+    libraries: dict[str, ChannelLibrary]
+    stability: layer_mod.StabilityMap | None
+    """None when no request derived a device layer."""
+
+    @classmethod
+    def after(cls, *requests: tuple[str, dict[str, Any]]) -> WarmStart:
+        """What a worker that started with nothing holds once it has answered ``requests``, each a request's name and
+        payload (in this process, whose calibration cache the reports are read from)."""
+        state = _LiveState()
+        for request, payload in requests:
+            HANDLERS[request](state, lambda stage, fraction, message: None, **payload)
+        return cls(
+            presets=dict(state.presets),
+            calibration=dict(core.CALIBRATION_CACHE.reports),
+            tables=dict(state.tables),
+            libraries=dict(state.libraries),
+            stability=state.stability,
+        )
+
+    def state(self) -> _LiveState:
+        """A worker's state that starts from this: the reports go into the process's calibration cache."""
+        core.CALIBRATION_CACHE.reports.update(self.calibration)
+        return _LiveState(
+            presets=dict(self.presets),
+            tables=dict(self.tables),
+            libraries=dict(self.libraries),
+            stability=self.stability,
+        )
+
+
+def initial_state() -> _LiveState:
+    """The state a worker starts with. A checkout starts with nothing, so every derivation runs on the code as it
+    stands; a packaged build, which carries no PLAN.md, starts from the warm start its build derived, so the start-up
+    circuit's first Run finds its calibration table and channel library instead of deriving them (half a minute in a
+    browser), and the first physics page the stability boundary."""
+    if (core.repository_root() / "PLAN.md").exists():
+        return _LiveState()
+    warm: WarmStart = pickle.loads(WARM_START_PATH.read_bytes())
+    return warm.state()
 
 
 def _preset_for(state: _LiveState, ref: DeviceRef, progress: Progress) -> core.DevicePreset:
@@ -212,8 +271,12 @@ def _derive(
     sweeps: bool = True,
 ) -> layer_mod.DeviceLayer:
     preset = _preset_for(state, device, progress)
+    if state.stability is None:
+        progress("deriving", 0.0, "the Mathieu stability boundary, once for every device")
+        state.stability = layer_mod.stability_map()
     return layer_mod.derive_device_layer(
         preset,
+        stability=state.stability,
         overrides=device.overrides,
         table=state.tables.get(preset.device.hash()),
         table_record=table_record,
@@ -327,7 +390,7 @@ def _run(state: _LiveState, results: Any, item: _Item) -> None:
 
 
 def _worker_main(requests: Any, results: Any) -> None:
-    state = _LiveState()
+    state = initial_state()
     while (item := requests.get()) is not None:
         _run(state, results, item)
 
@@ -406,7 +469,7 @@ class InlineTransport:
     failure = ""
 
     def __init__(self) -> None:
-        self.state = _LiveState()
+        self.state = initial_state()
         self.results: Any = queue.Queue()
         self._loop = asyncio.get_running_loop()
 
@@ -486,7 +549,7 @@ def serve_web_worker() -> Callable[[Any], None]:
     import js
     from pyodide.ffi import to_js
 
-    state = _LiveState()
+    state = initial_state()
 
     class Outbox:
         def put(self, event: Event) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from qutip_trap.calibration import DEFAULT_CACHE as CALIBRATION_CACHE
 from qutip_trap.calibration import calibrate
 from qutip_trap.calibration.surrogate import MU_ABOVE_TOP_FRACTION, surrogate_waveform
 from qutip_trap.control.compiler import Circuit, CompileReport, Operation, embed, ideal_probabilities
@@ -107,6 +108,7 @@ __all__ = [
     "C_M_PER_S",
     "CalEntry",
     "calibrate",
+    "CALIBRATION_CACHE",
     "CalibrationTable",
     "ChannelSummary",
     "CHI_MAXIMAL_RAD",

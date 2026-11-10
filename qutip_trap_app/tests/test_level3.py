@@ -158,13 +158,15 @@ def test_process_matrix_of_the_finished_pulse(bell: tuple[Record, LiveRun]) -> N
 
 
 def test_the_tables_readout_entries_reach_the_readout_page_and_the_device_card(
-    bell: tuple[Record, LiveRun],
+    bell: tuple[Record, LiveRun], stability: device_layer.StabilityMap
 ) -> None:
     """The table keys its detection entries as the core's flat keys (``detection['eps_B']``): the readout page shows the
     table's threshold, window and both errors, and the current device's card the table's errors beside its estimates,
     each stale once the table belongs to another device."""
     record, live = bell
-    layer = device_layer.derive_device_layer(record.job.device.build(), table=live.table, sweeps=False)
+    layer = device_layer.derive_device_layer(
+        record.job.device.build(), stability=stability, table=live.table, sweeps=False
+    )
     eps_b = record.table.entries[detection_key("eps_B")].value
     rows = readout_view(layer, record.table).table
     assert [r.label for r in rows] == [

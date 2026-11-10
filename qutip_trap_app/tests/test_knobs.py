@@ -132,10 +132,10 @@ def test_device_ref_carries_overrides_and_rebuilds_hash_checked() -> None:
 
 
 @pytest.fixture(scope="module")
-def layer(bell: tuple[Record, LiveRun]) -> device_layer.DeviceLayer:
+def layer(bell: tuple[Record, LiveRun], stability: device_layer.StabilityMap) -> device_layer.DeviceLayer:
     record, live = bell
     preset = record.job.device.build()
-    return device_layer.derive_device_layer(preset, table=live.table, sweeps=True)
+    return device_layer.derive_device_layer(preset, stability=stability, table=live.table, sweeps=True)
 
 
 def test_layer_agrees_with_the_record_it_describes(
@@ -226,7 +226,9 @@ def test_layer_agrees_with_the_record_it_describes(
     assert "current" in stale_status(layer)
 
 
-def test_downward_propagation_through_the_calibration_emulation(bell: tuple[Record, LiveRun]) -> None:
+def test_downward_propagation_through_the_calibration_emulation(
+    bell: tuple[Record, LiveRun], stability: device_layer.StabilityMap
+) -> None:
     """rf amplitude x1.1 -> beta, nu, eta change as Section 4.1 says; the recalibrated table's waveform closes at
     the new modes with a different amplitude; the device card (the layer's) updates without manual steps."""
     record, live = bell
@@ -234,9 +236,11 @@ def test_downward_propagation_through_the_calibration_emulation(bell: tuple[Reco
         record.job.device, overrides={"trap.rf_amplitude_scale": 1.1, "trap.rf_frequency_hz": 40e6}
     )
     preset = ref.build(check=False)
-    old_layer = device_layer.derive_device_layer(record.job.device.build(), table=live.table, sweeps=False)
+    old_layer = device_layer.derive_device_layer(
+        record.job.device.build(), stability=stability, table=live.table, sweeps=False
+    )
     stale_layer = device_layer.derive_device_layer(
-        preset, overrides=ref.overrides, table_record=record.table, sweeps=False
+        preset, stability=stability, overrides=ref.overrides, table_record=record.table, sweeps=False
     )
     assert stale_layer.stale and "stale" in stale_status(stale_layer)
     assert (
@@ -283,7 +287,9 @@ def test_downward_propagation_through_the_calibration_emulation(bell: tuple[Reco
     assert max(ratios) - min(ratios) < 1e-9 and abs(ratios[0] - 1.0) < 1e-3, (
         "the immediate closed-form solution is what the table re-solves, up to the exact spot check's one amplitude factor"
     )
-    fresh = device_layer.derive_device_layer(preset, overrides=ref.overrides, table=table, sweeps=False)
+    fresh = device_layer.derive_device_layer(
+        preset, stability=stability, overrides=ref.overrides, table=table, sweeps=False
+    )
     assert not fresh.stale and fresh.table_hash == preset.device.hash()
     card = layer_card_view(fresh, None)
     assert card.overrides and any("V_rf" in r.value.detail for r in card.overrides)

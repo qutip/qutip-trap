@@ -10,6 +10,7 @@ import os
 import pytest
 from fixtures import BELL, FAST, SEED, SHOTS
 
+from qutip_trap_app import device_layer
 from qutip_trap_app.core import Numerics
 from qutip_trap_app.record import LiveRun, Record, execute, job_for_preset
 from qutip_trap_app.replay import ChannelLibrary, replay
@@ -24,6 +25,12 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     for item in items:
         if "flet_app" in getattr(item, "fixturenames", ()):
             item.add_marker(skip)
+
+
+@pytest.fixture(scope="session")
+def stability() -> device_layer.StabilityMap:
+    """The stability boundary every device layer draws (device-independent: the worker computes it once, too)."""
+    return device_layer.stability_map()
 
 
 @pytest.fixture(scope="session")
