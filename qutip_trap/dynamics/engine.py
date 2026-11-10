@@ -739,7 +739,7 @@ class JointExactEngine:
                 if not active:
                     idle_built = built
             else:
-                # an idle segment's Hamiltonian (H_mot + H_int under the run's sample) is the run's one idle Hamiltonian
+                # every idle segment of a run has one Hamiltonian, H_mot + H_int under the run's sample
                 built = idle_built
             seg_ops = self._segment_channels(device, active, space, built, static_ops, notes)
             c_ops = [c.op for c in seg_ops]

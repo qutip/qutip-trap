@@ -480,9 +480,9 @@ def _low_pass(samples: np.ndarray, dt: float, tau: float, y0: float) -> np.ndarr
 def _trains(pulses: Sequence[Pulse]) -> list[list[Pulse]]:
     """Contiguous pulses on the same ions with the same drive kind and beams (the segments of one gate or composite pulse).
 
-    In start order, a pulse joins the first train (in the order the trains began) of its signature whose last pulse ends
-    where it starts. A train whose last pulse ends before the current start can take no later pulse, so it leaves the
-    candidates: each pulse is compared against the few trains still open on its signature."""
+    In start order, a pulse joins the earliest-begun train of its signature whose last pulse ends where it starts. A train
+    that ends before the current start can take no later pulse and is dropped from the candidates, so each pulse is
+    compared only with the few trains still open on its signature."""
     ordered = sorted(pulses, key=lambda p: (p.t_start_s, tuple(p.drive.ions)))
     trains: list[list[Pulse]] = []
     open_by_signature: dict[tuple[object, ...], list[list[Pulse]]] = {}
@@ -504,8 +504,8 @@ def _trains(pulses: Sequence[Pulse]) -> list[list[Pulse]]:
 
 
 def _next_starts(trains: Sequence[Sequence[Pulse]]) -> list[float]:
-    """Per train, the earliest start of a later train on a shared ion that begins after it ends (to 1e-15 s), inf when none:
-    per ion, the trains' starts ascend with their order, so the first later one past the end is a bisection away."""
+    """Per train, the earliest start of a later train on a shared ion that begins once it ends (to 1e-15 s), inf if none.
+    Per ion the trains' starts ascend with their order, so that start is one bisection away."""
     starts_by_ion: dict[int, list[float]] = {}
     order_by_ion: dict[int, list[int]] = {}
     for k, train in enumerate(trains):

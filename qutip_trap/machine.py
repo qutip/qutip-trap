@@ -30,9 +30,9 @@ if TYPE_CHECKING:
 COST_FIXED_S = 0.02
 """Section 11.2's fitted per-segment constant a of cost = a + (seconds per evaluation) x evaluations."""
 COST_EVALUATION_US = 10.0
-"""What a right-hand-side evaluation costs besides its drive terms (us): the frame's phase vector, the coefficients, QuTiP's
-element dispatch and the integrator's own stage arithmetic, measured as the evaluation's 22 us less its drive terms' 12 us
-on the Bell circuit's MS segments of ``presets.yb171_chain(2)`` (dimension 572)."""
+"""A right-hand-side evaluation's cost besides its drive terms (us): the frame's phase vector, the coefficients, QuTiP's
+dispatch and the integrator's own arithmetic; on the Bell circuit's MS segments of ``presets.yb171_chain(2)`` (dimension
+572) an evaluation takes 22 us, its drive terms 12."""
 EVALUATIONS_PER_PULSE_SECOND = 2.8e8
 """Right-hand-side evaluations per second of pulse the engine makes in its exact rotating frame, with dop853 at atol 1e-10
 and rtol 1e-8, counted on QuTiP's dop853 right-hand side: 1.9 to 3.2 x 10^8 over the segments of the Bell circuit on
@@ -76,14 +76,15 @@ class Estimate:
 
 
 def _evaluation_cost_s(dims: Sequence[int], ion_factors: Sequence[int], mode_factors: Sequence[int]) -> float:
-    """Seconds per right-hand-side evaluation with the drive terms on the ions at ``ion_factors`` of a space of ``dims``:
+    """Seconds per right-hand-side evaluation with drive terms on the ions at ``ion_factors`` of a space of ``dims``:
     ``COST_EVALUATION_US`` plus two terms per ion (sigma_+^i (x) prod_m D_m over ``mode_factors`` and its conjugate), each
-    ion's held in the kernel the builder's ``auto`` rule picks for it (``dynamics.kernels.prefer_factorized``), the
-    factorized ones as one batch and the assembled ones as CSR products (``dynamics.kernels.kernel_costs_us``)."""
+    ion's in the kernel the builder's ``auto`` rule picks for it (``dynamics.kernels.prefer_factorized``), the factorized
+    ones as one batch and the assembled ones as CSR products (``dynamics.kernels.kernel_costs_us``)."""
     from qutip_trap.dynamics.kernels import kernel_costs_us, prefer_factorized
 
-    factorized = [f for f in ion_factors if prefer_factorized(dims, f, mode_factors)]
-    assembled = [f for f in ion_factors if not prefer_factorized(dims, f, mode_factors)]
+    held = [(f, prefer_factorized(dims, f, mode_factors)) for f in ion_factors]
+    factorized = [f for f, fact in held if fact]
+    assembled = [f for f, fact in held if not fact]
     total_us = COST_EVALUATION_US
     if assembled:
         total_us += kernel_costs_us(dims, assembled, mode_factors)[0]
