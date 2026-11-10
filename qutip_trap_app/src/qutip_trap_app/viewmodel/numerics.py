@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from qutip_trap_app import core
-from qutip_trap_app.record import ConvergenceRecord, Record, ZoomTrace
+from qutip_trap_app.record import ConvergenceRecord, FidelityLevelRun, Record, ZoomTrace
 from qutip_trap_app.resim import TruncationCheck
 from qutip_trap_app.viewmodel.builder import listed
 from qutip_trap_app.viewmodel.catalogue import Shown
@@ -37,6 +37,8 @@ class Badge:
 @dataclass(frozen=True)
 class NumericsPanel:
     level: Shown
+    engine: FidelityLevelRun
+    """The level the run integrated at, as the record types it: the strip's one line names it in words."""
     dimension: Shown
     caps: tuple[Shown, ...]
     mode_classes: tuple[Shown, ...]
@@ -202,6 +204,7 @@ def numerics_panel(
     return NumericsPanel(
         derivation_residual=residual,
         level=Shown("fidelity_level", d.level),
+        engine=d.level,
         dimension=Shown("dimension", sp.dimension),
         caps=caps,
         mode_classes=tuple(Shown("mode_class", c, of=f"mode {m}") for m, c in sorted(sp.mode_class.items())),

@@ -45,6 +45,7 @@ from qutip_trap_app.views.common import (
     kv_rows,
     level_header,
     not_in_record,
+    page_scroll,
     shown,
     stat_row,
     stat_tile,
@@ -171,6 +172,31 @@ def _lanes(
             )
         lanes.append(lane(f"ion {ion}", boxes, width))
     return ft.Column(lanes + [time_axis_row(t0, t1, width)], spacing=2)
+
+
+def _gate_picker(gates: tuple[GateView, ...], selected: str, on_select: Any) -> ft.Control:
+    """The gates in the order they play, each a named chip. A lane's box is as long as its gate lasts, so a 2 µs
+    rotation beside a 100 µs entangling gate is a sliver too small to name or to hit; here every gate has both."""
+    return ft.Row(
+        [
+            ft.Chip(
+                label=ft.Text(g.gate_id, size=theme.SIZE_SMALL),
+                selected=g.gate_id == selected,
+                on_click=functools.partial(_pick, on_select, g.gate_id),
+                show_checkmark=False,
+                tooltip=f"{g.name.value} on {ions_text(g.ions)}, {g.t_start_s * 1e6:.1f} to {g.t_end_s * 1e6:.1f} µs",
+                key=f"gate-chip:{g.gate_id}",
+            )
+            for g in gates
+        ],
+        wrap=True,
+        spacing=6,
+        run_spacing=6,
+    )
+
+
+def _pick(on_select: Any, gate_id: str, _e: Any) -> None:
+    on_select(gate_id)
 
 
 # ---- requests (Section 14.4) -----------------------------------------------------------------------------------------
@@ -493,10 +519,10 @@ def Level1Page(
                 selected.gate_id,
                 "angle",
                 lambda chi: request_angle(record, selected.gate_id, chi),
-                field_label="chi (rad)",
+                field_label="χ (rad)",
                 default="0.3",
                 width=110,
-                button="Request XX(chi)",
+                button="Request XX(χ)",
                 tooltip="a request, not an edit: the job is rebuilt with this angle and run at the full engine (Section 14.4)",
                 parse_error="the requested angle must be a number in radians",
             )
@@ -565,12 +591,12 @@ def Level1Page(
                     spacing=12,
                 ),
             ],
-            title="Show",
+            title="Details",
         ),
         why=lambda e: session.select_concept(1, "virtual_z"),
         key="frame",
     )
-    return ft.Column(
+    return page_scroll(
         [
             level_header(
                 "The circuit", "What did each gate do to the qubits?", note=f"{len(gates)} native gate pieces"
@@ -580,6 +606,7 @@ def Level1Page(
                 ft.Column(
                     [
                         _lanes(record, gates, selected.gate_id, on_select, lanes_width),
+                        _gate_picker(gates, selected.gate_id, on_select),
                         hint(store, 1, "native_gate"),
                     ],
                     spacing=theme.GAP,
@@ -589,7 +616,4 @@ def Level1Page(
             ),
             columns(store, page, 1, [register_card], [gate_card, extras], split=(7, 5)),
         ],
-        spacing=16,
-        expand=True,
-        scroll=ft.ScrollMode.AUTO,
     )

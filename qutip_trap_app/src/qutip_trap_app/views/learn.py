@@ -38,6 +38,7 @@ from qutip_trap_app.views.common import (
     hint,
     inset,
     level_header,
+    page_scroll,
     page_tabs,
     status_line,
 )
@@ -501,14 +502,11 @@ def LearnPage(
         lambda t: page.navigate(routes.learn() if t == "tour" else routes.learn(t)),
         key_prefix="learn-tab",
     )
-    return ft.Column(
+    return page_scroll(
         [
             level_header("Learn", "Where to start, what to practise, what to reproduce."),
             SettingsRow(store, session),
             nav,
             ACTIVITIES[tab].render(store, session, index),
         ],
-        spacing=16,
-        expand=True,
-        scroll=ft.ScrollMode.AUTO,
     )

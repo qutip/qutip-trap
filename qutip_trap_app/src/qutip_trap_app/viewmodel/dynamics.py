@@ -24,6 +24,8 @@ class Series:
     label: str
     times_s: np.ndarray
     values: np.ndarray
+    of: str = ""
+    """What the series belongs to (``ion 0``), where a screen shows one value of each beside the others."""
 
     def __post_init__(self) -> None:
         Shown(self.quantity, None)  # validates the catalogue id
@@ -90,14 +92,20 @@ def pulse_dynamics(record: Record, z: ZoomTrace) -> PulseDynamics:
     t = tr.times_s
     two_level = bool(tr.reduced_internal.size) and all(d == 2 for d in tr.ion_dims)
     pops = tuple(
-        Series("P1", f"P1 ion {i}", t, np.asarray(np.real(tr.expectations[f"P1[{i}]"]), dtype=float))
+        Series(
+            "P1",
+            f"P₁ of ion {i}",
+            t,
+            np.asarray(np.real(tr.expectations[f"P1[{i}]"]), dtype=float),
+            of=f"ion {i}",
+        )
         for i in range(n)
         if f"P1[{i}]" in tr.expectations
     )
     coh = tuple(
         Series(
             "coherence",
-            f"|rho_01| ion {i}",
+            f"|ρ₀₁| of ion {i}",
             t,
             np.asarray(
                 [abs(single_ion_reduced(rho, i, n)[0, 1]) for rho in tr.reduced_internal], dtype=float
@@ -125,7 +133,7 @@ def pulse_dynamics(record: Record, z: ZoomTrace) -> PulseDynamics:
         keys = ("XX", "YY", "ZZ", "ZI", "IZ")
         expectations = [pauli_expectations(rho, 2) for rho in tr.reduced_internal]
         pauli = [
-            Series("pauli_expectation", f"<{k}>", t, np.asarray([pe[k] for pe in expectations], dtype=float))
+            Series("pauli_expectation", f"⟨{k}⟩", t, np.asarray([pe[k] for pe in expectations], dtype=float))
             for k in keys
         ]
         cvals = np.asarray([concurrence(rho) for rho in tr.reduced_internal], dtype=float)
@@ -144,7 +152,7 @@ def pulse_dynamics(record: Record, z: ZoomTrace) -> PulseDynamics:
         populations=pops,
         coherences=coh,
         nbar=tuple(
-            Series("mode_nbar", f"<n> mode {m}", t, np.asarray(v, dtype=float))
+            Series("mode_nbar", f"⟨n⟩ of mode {m}", t, np.asarray(v, dtype=float))
             for m, v in sorted(tr.mode_nbar.items())
         ),
         loops=loops,

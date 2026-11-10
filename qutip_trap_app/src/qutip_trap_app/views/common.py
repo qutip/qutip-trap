@@ -8,14 +8,16 @@ colour alone; the explain drawer shows one concept at a time with the Part II te
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Sequence
 from typing import Any
 
 import flet as ft
 
 from qutip_trap_app.provenance import ProvenanceIndex
+from qutip_trap_app.record import FidelityLevelRun
 from qutip_trap_app.viewmodel.builder import listed
-from qutip_trap_app.viewmodel.catalogue import CATALOGUE, Shown, fmt_shown
+from qutip_trap_app.viewmodel.catalogue import CATALOGUE, Shown, fmt_shown, split_power_of_ten
 from qutip_trap_app.viewmodel.learn import CONCEPTS, DEPTHS, Attempt, Prompt, explain, now_days, score_choice
 from qutip_trap_app.viewmodel.numerics import Badge, NumericsPanel
 from qutip_trap_app.views import theme
@@ -31,11 +33,46 @@ def hover_text(s: Shown) -> str:
     q = CATALOGUE[s.quantity]
     parts = [q.term]
     if q.unit == "Hz":
-        parts.append("ordinary frequency; the angular value is 2 pi times this")
+        parts.append("ordinary frequency; the angular value is 2π times this")
     if s.detail:
         parts.append(s.detail)
     parts.append(f"Section {q.section}")
     return "\n".join(parts)
+
+
+_SYMBOL_WORDS = frozenset(
+    {
+        # Greek letters and solver symbols written out: capitalised they would name another quantity
+        *(
+            "alpha",
+            "beta",
+            "chi",
+            "delta",
+            "eps",
+            "eta",
+            "mu",
+            "nu",
+            "omega",
+            "phi",
+            "pi",
+            "tau",
+            "atol",
+            "rtol",
+        ),
+        # gate names, which the circuit writes in lower case
+        *("gpi", "ms", "zz", "rx", "ry", "rz", "cnot", "cz", "cp", "rxx", "rzz", "swap"),
+    }
+)
+
+
+def sentence_case(text: str) -> str:
+    """A caption in sentence case, as every label of the screens is: its first word capitalised when it is a word. A
+    symbol keeps its case (``eta``, ``n' = 0``, ``q0``, ``eps_B``, ``ms``)."""
+    first = text.split(" ", 1)[0]
+    # a hyphenated word is a word (first-order); anything else with a mark in it is a symbol
+    if first.replace("-", "").isalpha() and first.islower() and first not in _SYMBOL_WORDS:
+        return text[0].upper() + text[1:]
+    return text
 
 
 def ions_text(ions: Sequence[int]) -> str:
@@ -160,31 +197,57 @@ TILE_LABEL_WIDTH = 150.0
 """A stat tile's label wraps at this width, so a row of tiles keeps an even rhythm whatever the values' lengths."""
 
 
+def tile_value(text: str, *, tooltip: str) -> ft.Control:
+    """A stat tile's value. A power of ten's exponent is set raised and smaller in the value's own face: the superscript
+    characters of the one number format come from a fallback font, which has no semibold and so breaks a large value's
+    weight (a thin minus beside a bold digit)."""
+    mantissa, exponent, rest = split_power_of_ten(text)
+
+    def part(piece: str, size: int) -> ft.Text:
+        return ft.Text(piece, size=size, weight=ft.FontWeight.W_600, selectable=True, no_wrap=True)
+
+    if not exponent:
+        return ft.Text(
+            text, size=theme.SIZE_VALUE, weight=ft.FontWeight.W_600, tooltip=tooltip, selectable=True
+        )
+    pieces: list[ft.Control] = [
+        part(mantissa, theme.SIZE_VALUE),
+        part(exponent.replace("-", "−"), theme.SIZE_BODY),
+    ]
+    if rest:
+        pieces.append(part(rest, theme.SIZE_VALUE))
+    return ft.Container(
+        # top-aligned, the smaller exponent stands at the value's cap height
+        content=ft.Row(pieces, spacing=0, tight=True, vertical_alignment=ft.CrossAxisAlignment.START),
+        tooltip=tooltip,
+    )
+
+
 def stat_tile(
-    s: Shown, index: ProvenanceIndex, *, plain: bool = True, label: str | None = None, status: str = ""
+    s: Shown,
+    index: ProvenanceIndex,
+    *,
+    plain: bool = True,
+    label: str | None = None,
+    of: str = "",
+    status: str = "",
 ) -> ft.Control:
     """A number as a stat tile: the value large with its chip beside it, the plain label (or the term) small beneath, and
-    an optional status word (estimate, calibrated, stale)."""
+    an optional status word (estimate, calibrated, stale). ``of`` names what the value belongs to (``ion 0``, ``mode 2``)
+    where a row holds several tiles of one quantity, which would otherwise read alike."""
     q = CATALOGUE[s.quantity]
     head = ft.Row(
-        [
-            ft.Text(
-                fmt_shown(s),
-                size=theme.SIZE_VALUE,
-                weight=ft.FontWeight.W_600,
-                tooltip=hover_text(s),
-                selectable=True,
-            ),
-            chip(q.ledger_id, index),
-        ],
+        [tile_value(fmt_shown(s), tooltip=hover_text(s)), chip(q.ledger_id, index)],
         spacing=6,
         vertical_alignment=ft.CrossAxisAlignment.CENTER,
         tight=True,
     )
     caption = label if label is not None else (q.label if plain else q.term)
+    if of:
+        caption = f"{caption}, {of}"
     below: list[ft.Control] = [
         ft.Text(
-            caption,
+            sentence_case(caption),
             size=theme.SIZE_SMALL,
             color=MUTED,
             tooltip=q.term if plain else q.label,
@@ -205,7 +268,15 @@ TILES_MAX = 6
 
 
 def stat_row(tiles: Sequence[ft.Control]) -> ft.Control:
-    return ft.Row(list(tiles), wrap=True, spacing=theme.GAP * 2, run_spacing=theme.GAP)
+    """Stat tiles side by side, wrapping, their values on one line: a tile whose label wraps to three lines stands beside
+    one whose label takes one, so the row aligns its tiles by their tops."""
+    return ft.Row(
+        list(tiles),
+        wrap=True,
+        spacing=theme.GAP * 2,
+        run_spacing=theme.GAP,
+        vertical_alignment=ft.CrossAxisAlignment.START,
+    )
 
 
 def tile_row(values: Sequence[Shown], index: ProvenanceIndex, *, plain: bool = True) -> ft.Control:
@@ -259,11 +330,30 @@ def badge_view(badge: Badge, *, extra: str = "") -> ft.Control:
     return pill(text, badge.status, tooltip="\n".join(reasons))
 
 
+NUMERICS_SHARE = 1.0 / 3.0
+"""The share of the window's height the open numerics panel takes; its rows scroll inside it. Open and unbounded it left
+the level's own picture a strip a few lines tall (Level 3 opens it for everyone)."""
+NUMERICS_MIN_HEIGHT = 160.0
+
+ENGINE_WORDS: dict[FidelityLevelRun, str] = {
+    "CHANNEL_REPLAY": "channel replay",
+    "JOINT_EXACT": "full simulation",
+    "GATE_LOCAL": "gate-local simulation",
+}
+"""A run's fidelity level as the engine dropdown names it, for the strip's one line; the panel inside keeps the core's
+own name beside its chip."""
+
+
 def numerics_strip(
-    panel: NumericsPanel, index: ProvenanceIndex, *, expanded: bool, on_change: Callable[[Any], None]
+    panel: NumericsPanel,
+    index: ProvenanceIndex,
+    *,
+    expanded: bool,
+    on_change: Callable[[Any], None],
+    window_height: float,
 ) -> ft.Control:
     """The numerics panel of every level as a strip whose collapsed form is the badge, the engine and the joint dimension;
-    everything else inside."""
+    everything else inside, in a panel that scrolls within ``NUMERICS_SHARE`` of the window."""
     rows: list[ft.Control] = [
         status_line(panel.engine_note),
         stat_row(
@@ -311,9 +401,9 @@ def numerics_strip(
                 spacing=2,
             )
         )
-    level = str(panel.level.value or "")
+    level = ENGINE_WORDS[panel.engine]
     dim = panel.dimension.value
-    extra = f"{level}, dimension {dim}" if dim is not None else level
+    extra = f"{level} · dimension {dim}" if dim is not None else level
     tile = ft.ExpansionTile(
         title=ft.Row(
             [
@@ -323,7 +413,17 @@ def numerics_strip(
             spacing=12,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         ),
-        controls=[ft.Container(content=ft.Column(rows, spacing=10), padding=ft.Padding.all(12))],
+        controls=[
+            ft.Container(
+                content=ft.Column(rows, spacing=10, scroll=ft.ScrollMode.AUTO),
+                # under the strip's title, which the tile insets by the same amount
+                padding=ft.Padding.only(
+                    left=theme.PAGE_PADDING - theme.GAP, right=theme.GAP, bottom=theme.GAP
+                ),
+                height=max(NUMERICS_MIN_HEIGHT, NUMERICS_SHARE * window_height),
+            )
+        ],
+        expanded_cross_axis_alignment=ft.CrossAxisAlignment.STRETCH,
         expanded=expanded,
         on_change=on_change,
         dense=True,
@@ -350,6 +450,15 @@ def page_padding(page: Any) -> float:
     return float(theme.PAGE_PADDING_COMPACT if compact(page) else theme.PAGE_PADDING)
 
 
+def drawer_open(store: Any, page: Any, level: int) -> bool:
+    """Whether the explain drawer is open on ``level``: the learner's own choice once they have made one, else what
+    their plan says, except on a compact window. There the drawer is a sheet over the lower half of the screen, and
+    open before the learner has seen the page it leaves a few lines of it: it opens when asked."""
+    if store.learner.explain_open is None and compact(page):
+        return False
+    return bool(store.learner.explain_is_open(level))
+
+
 def drawer_docked(page: Any) -> bool:
     """Whether the explain drawer is docked under the content rather than beside it: on a compact window, and on any
     window where beside it the content column would keep less than ``theme.CONTENT_BESIDE_DRAWER_MIN_WIDTH``."""
@@ -369,7 +478,7 @@ def content_width(store: Any, page: Any, level: int = 0) -> float:
     capped at the reading width. Every layout decision that depends on the room available reads this one number."""
     room = (
         (page.width or 1200.0)
-        - _beside_content(page, store.learner.explain_is_open(level))
+        - _beside_content(page, drawer_open(store, page, level))
         - 2 * page_padding(page)
     )
     # the room there is, however little: a floor above it would size drawings wider than the column that holds them
@@ -429,6 +538,56 @@ def content_margin(page: Any, drawer_open: bool) -> float:
     """The side margin that centres the content column once the window is wider than the reading width."""
     room = (page.width or 1200.0) - _beside_content(page, drawer_open) - 2 * page_padding(page)
     return max(0.0, (room - theme.CONTENT_MAX_WIDTH) / 2.0)
+
+
+SCROLL_GUTTER = 12.0
+"""The strip at the right of a page's scrolling column that holds its scrollbar, taken out of the page's right padding:
+the bar stands beside the cards, never on their border."""
+
+PageScroller = ft.Ref[ft.Column]
+"""A page's scrolling column, held by the page so that it can bring something into view."""
+SCROLL_KEY_SETTLE_S = 0.12
+"""How long a scroll to a control that has just appeared waits for the client to build it (a few frames)."""
+
+
+def page_scroll(controls: Sequence[ft.Control], *, scroller: PageScroller | None = None) -> ft.Control:
+    """A page: its header and cards in the one column that scrolls, with the scrollbar's gutter at its right."""
+    return ft.Column(
+        [
+            ft.Container(
+                content=ft.Column(list(controls), spacing=16),
+                padding=ft.Padding.only(right=SCROLL_GUTTER),
+            )
+        ],
+        expand=True,
+        scroll=ft.ScrollMode.AUTO,
+        ref=scroller,
+    )
+
+
+def scroll_page(page: ft.Page, scroller: PageScroller, *, to: ft.ScrollKey | None = None) -> None:
+    """Bring ``to`` into view on the page ``scroller`` holds, or its top when there is no target: what a press produced
+    is shown where the learner is looking, not left below the fold. The top is a jump, since what stood there has just
+    been replaced; a target is glided to."""
+
+    async def scroll() -> None:
+        # the column on screen when the task runs: a re-render between the effect and the task replaces the control the
+        # effect saw, and the replaced one is detached from the page
+        column = scroller.current
+        if column is None:  # the page left the screen meanwhile
+            return
+        if to is None:
+            await column.scroll_to(offset=0.0)
+        else:
+            await column.scroll_to(scroll_key=to, duration=ft.Duration(milliseconds=200))
+
+    async def scroll_once_built() -> None:
+        # the client knows a scroll key from the frame that builds the keyed control, which is the frame after the patch
+        # that created it arrives: a scroll sent with the patch finds no such key yet
+        await asyncio.sleep(SCROLL_KEY_SETTLE_S)
+        await scroll()
+
+    page.run_task(scroll if to is None else scroll_once_built)
 
 
 def level_header(title: str, question: str, *, note: str = "") -> ft.Control:
@@ -496,7 +655,14 @@ def card(
 ) -> ft.Control:
     """A card with a noun for a title, a why button (its concept in the explain drawer) and an info button (notes,
     approximations, methods on hover) in its title row, and no subtitle: a hairline-bordered surface, never a shadow."""
-    head: list[ft.Control] = [ft.Text(title, weight=ft.FontWeight.W_600, size=theme.SIZE_CARD_TITLE)]
+    heading = ft.Text(title, weight=ft.FontWeight.W_600, size=theme.SIZE_CARD_TITLE)
+    if not trailing:
+        # as wide as its words and no wider than the room: on a narrow card a long title wraps, and the why and info
+        # buttons stay beside it instead of leaving the card's edge. (With trailing controls a spacer takes the room
+        # between the title and them, and a flexible title would share it and strand them mid-row.)
+        heading.expand = True
+        heading.expand_loose = True
+    head: list[ft.Control] = [heading]
     if why is not None:
         head.append(
             small_icon_button(
@@ -512,8 +678,9 @@ def card(
                 lambda e: notes_dialog(e.control.page, title, lines),
             )
         )
-    head.append(ft.Container(expand=True))
-    head.extend(trailing)
+    if trailing:
+        head.append(ft.Container(expand=True))
+        head.extend(trailing)
     content: list[ft.Control] = [
         ft.Row(head, spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
         body,
@@ -617,30 +784,37 @@ def not_in_record(what: str, known: str, route: str, go: str) -> ft.Control:
     """A route that names a gate, pulse or sample the job does not have: say so and what it has, and offer the way to a
     real one, rather than showing another in its place under a crumb that names the missing one."""
     page = ft.context.page
-    return empty_state(
-        f"No {what} in this job",
-        known,
-        icon=ft.Icons.SEARCH_OFF,
-        action=ft.FilledTonalButton(
-            content=ft.Text(go), on_click=lambda e: page.navigate(route), key="not-in-record"
-        ),
-        key="not-in-record-state",
+    return page_scroll(
+        [
+            empty_state(
+                f"No {what} in this job",
+                known,
+                icon=ft.Icons.SEARCH_OFF,
+                action=ft.FilledTonalButton(
+                    content=ft.Text(go), on_click=lambda e: page.navigate(route), key="not-in-record"
+                ),
+                key="not-in-record-state",
+            )
+        ]
     )
 
 
 def kv_rows(pairs: Sequence[tuple[str, ft.Control]], *, label_width: float = 150) -> ft.Control:
+    """Labelled values as two columns: the label at a fixed width, the value in the room beside it (where a long value
+    wraps), so that every value starts on one vertical line."""
     return ft.Column(
         [
             ft.Row(
-                [ft.Text(k, size=theme.SIZE_SMALL, color=MUTED, width=label_width), v],
+                [
+                    ft.Text(sentence_case(k), size=theme.SIZE_SMALL, color=MUTED, width=label_width),
+                    ft.Container(content=v, expand=True),
+                ],
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                wrap=True,
-                spacing=6,
-                run_spacing=0,
+                spacing=theme.GAP,
             )
             for k, v in pairs
         ],
-        spacing=4,
+        spacing=6,
     )
 
 
@@ -970,7 +1144,7 @@ def ExplainDrawer(
         vertical_alignment=ft.CrossAxisAlignment.CENTER,
     )
     depth_control = ft.SegmentedButton(
-        segments=[ft.Segment(value=d, label=ft.Text(d, size=theme.SIZE_SMALL)) for d in DEPTHS],
+        segments=[ft.Segment(value=d, label=ft.Text(d.capitalize(), size=theme.SIZE_SMALL)) for d in DEPTHS],
         selected=[depth],
         on_change=set_depth,
     )
@@ -1014,13 +1188,13 @@ def _explain_card(session: Any, concept_id: str, depth: Any, index: ProvenanceIn
             run_spacing=4,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         ),
-        ft.Text(f"you will be able to {concept.can_do}", size=theme.SIZE_CAPTION, italic=True, color=MUTED),
+        ft.Text(f"You will be able to {concept.can_do}.", size=theme.SIZE_CAPTION, italic=True, color=MUTED),
     ]
     if card_data.deeper is not None:
         deeper = card_data.deeper
         body.append(
             ft.TextButton(
-                content=ft.Text(f"deeper: {deeper}"),
+                content=ft.Text(f"Deeper: {deeper}"),
                 icon=ft.Icons.ZOOM_IN,
                 on_click=lambda e: session.set_learner(depth_override=deeper),
             )

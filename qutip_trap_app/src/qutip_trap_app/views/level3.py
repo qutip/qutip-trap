@@ -40,6 +40,7 @@ from qutip_trap_app.views.common import (
     kv_rows,
     level_header,
     not_in_record,
+    page_scroll,
     section_title,
     shown,
     shown_row,
@@ -157,9 +158,9 @@ def _closure_feedback(store: Store, key: str, dyn: PulseDynamics) -> ft.Control:
     ok = score_closure(pick, closes, excursions)
     worst = max((closes[m] / max(excursions.get(m, 0.0), 1e-12) for m in closes), default=0.0)
     text = (
-        f"your pick '{pick}' matches the record"
+        f"Your pick, '{pick}', matches the record"
         if ok
-        else f"your pick was '{pick}'; the loops end within {worst:.1%} of their largest excursion"
+        else f"Your pick was '{pick}'; the loops end within {worst:.1%} of their largest excursion"
     )
     return ft.Container(
         content=ft.Text(text, size=theme.SIZE_SMALL),
@@ -237,7 +238,7 @@ def Level3Page(
                 on_click=lambda e: page.navigate(routes.job(key)),
             )
         )
-        return ft.Column(
+        return page_scroll(
             [
                 header,
                 card(
@@ -260,9 +261,6 @@ def Level3Page(
                     key="no-trace",
                 ),
             ],
-            spacing=16,
-            expand=True,
-            scroll=ft.ScrollMode.AUTO,
         )
     dyn = pulse_dynamics(record, z)
     target = {"key": key, "step": step, "sample": sample, "branch": branch}
@@ -289,7 +287,7 @@ def Level3Page(
     controls = ft.Row(
         [
             ft.Dropdown(
-                label="sample",
+                label="Sample",
                 value=str(sample),
                 options=[ft.DropdownOption(key=str(k), text=f"sample {k}") for k in range(record.n_samples)],
                 on_select=set_sample,
@@ -297,7 +295,7 @@ def Level3Page(
                 **input_style(),
             ),
             ft.Dropdown(
-                label="branch",
+                label="Branch",
                 value=str(branch),
                 options=[
                     ft.DropdownOption(
@@ -368,7 +366,7 @@ def Level3Page(
             drawing.phase_space(loops, width=min(440.0, card_room(store, page, 3, share=0.5)), height=320),
         ]
     motion_children.append(hint(store, 3, "spin_dependent_force"))
-    motion_children.append(_series_chart(dyn.nbar, y_title="<n_m>", height=150))
+    motion_children.append(_series_chart(dyn.nbar, y_title="⟨n⟩, quanta per mode", height=150))
     motion_children.append(
         details(
             store, session, 3, "level3.loops", [_loop_table(dyn, first_ion, index)], title="Closure per loop"
@@ -383,12 +381,12 @@ def Level3Page(
     )
     qubit_series = list(dyn.populations) + list(dyn.coherences)
     qubit_children: list[ft.Control] = [
-        _series_chart(qubit_series, y_title="P1, |rho_01|", height=220),
-        stat_row([stat_tile(_last(s), index, plain=plain) for s in dyn.populations]),
+        _series_chart(qubit_series, y_title="P₁ and |ρ₀₁|", height=220),
+        stat_row([stat_tile(_last(s), index, plain=plain, of=s.of) for s in dyn.populations]),
     ]
     if dyn.concurrence is not None:
         qubit_children.append(
-            _series_chart([dyn.concurrence] + list(dyn.pauli), y_title="concurrence, <P>", height=150)
+            _series_chart([dyn.concurrence] + list(dyn.pauli), y_title="concurrence and ⟨PP⟩", height=150)
         )
     qubit_children.append(hint(store, 3, "fock_states"))
     qubit_card = card(
@@ -411,8 +409,11 @@ def Level3Page(
                 [
                     section_title(f"mode {m}: P(n) at the start (outlined) and the end (filled)"),
                     drawing.fock_bars(start, end),
-                    tile_row(
-                        (_fock_shown(m, start, "start"), _fock_shown(m, end, "end")), index, plain=plain
+                    stat_row(
+                        [
+                            stat_tile(_fock_shown(m, dist, when), index, label=f"P(n = 0) at the {when}")
+                            for dist, when in ((start, "start"), (end, "end"))
+                        ]
                     ),
                 ],
                 spacing=6,
@@ -433,8 +434,9 @@ def Level3Page(
                         y_labels=[str(n) for n in range(top_n + 1)],
                         x_title="t (µs)",
                         y_title="n",
-                        tooltip="log colour scale over six decades; hover for values",
+                        room=card_room(store, page, 3, share=0.5),
                     ),
+                    section_title(f"mode {hm.mode}: ⟨n⟩ at each of these times"),
                     shown_row(hm.nbar, index, label=False, spacing=8),
                 ],
                 spacing=6,
@@ -480,7 +482,7 @@ def Level3Page(
                         ),
                         stat_tile(dyn.wall_time, index, plain=plain),
                     ]
-                    + [stat_tile(b, index, plain=plain) for b in dyn.boundary_population]
+                    + [stat_tile(b, index, plain=plain, of=b.detail) for b in dyn.boundary_population]
                 ),
                 hint(store, 3, "quantum_jumps"),
                 details(
@@ -560,7 +562,7 @@ def Level3Page(
         ft.Column(
             [
                 ft.OutlinedButton(
-                    content=ft.Text("Re-check: tolerances x0.1 and caps +2"),
+                    content=ft.Text("Re-check: tolerances × 0.1, caps + 2"),
                     icon=ft.Icons.VERIFIED_OUTLINED,
                     on_click=lambda e: session.submit_recheck(key, step, sample, branch),
                     disabled=rechecking,
@@ -574,8 +576,9 @@ def Level3Page(
         why=lambda e: session.select_concept(3, "truncation_and_convergence"),
         key="recheck",
     )
-    body.append(columns(store, page, 3, [fock_card, recheck_card], [sample_card, pm_card]))
-    return ft.Column(body, spacing=16, expand=True, scroll=ft.ScrollMode.AUTO)
+    # the vibration numbers are the tall card: the three short ones stand beside it
+    body.append(columns(store, page, 3, [fock_card], [sample_card, pm_card, recheck_card]))
+    return page_scroll(body)
 
 
 def _last(series: Any) -> Shown:
