@@ -69,6 +69,13 @@ copyright = "Copyright (C) 2026 Spencer Churchill"
 color = "#F7F7F5"
 dark_color = "#131314"
 
+[tool.flet.boot_screen.flet]
+# between the splash and the first frame, while Python and QuTiP load: the same page colours, a spinner and what the wait is
+bgcolor_light = "#F7F7F5"
+bgcolor_dark = "#131314"
+spinner_size = 30
+startup_message = "Loading Python and QuTiP: about 40 MB on a first visit"
+
 [tool.flet.app]
 path = "src"
 # the tests, the Flutter build tree and the provisioned test host never ship in a bundle
