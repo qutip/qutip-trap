@@ -44,6 +44,18 @@ def _callable_token(fn: Callable[..., Any]) -> str:
     return f"callable:{name}:{hashlib.sha256(src.encode()).hexdigest()}"
 
 
+def _feed_none(h: Any, _obj: None) -> None:
+    h.update(b"N;")
+
+
+def _feed_bool(h: Any, obj: bool) -> None:
+    h.update(b"T;" if obj else b"F;")
+
+
+def _feed_int(h: Any, obj: int) -> None:
+    h.update(f"i{obj};".encode())
+
+
 def _feed_float(h: Any, obj: float) -> None:
     h.update(f"f{canonical_float(obj)};".encode())
 
@@ -68,15 +80,16 @@ def _hashed_fields(cls: type) -> tuple[str, ...]:
 
 
 _EXACT: dict[type, Callable[[Any, Any], None]] = {
-    type(None): lambda h, _obj: h.update(b"N;"),
-    bool: lambda h, obj: h.update(b"T;" if obj else b"F;"),
-    int: lambda h, obj: h.update(f"i{obj};".encode()),
+    type(None): _feed_none,
+    bool: _feed_bool,
+    int: _feed_int,
     float: _feed_float,
     str: _feed_str,
     tuple: _feed_sequence,
     list: _feed_sequence,
 }
-"""The writers of the commonest exact types, the ones the chain in ``_feed`` reaches for them, looked up before it."""
+"""The writer of each common exact type, found before ``_feed``'s isinstance chain, which takes their subclasses (an
+IntEnum, NumPy's float64, a NamedTuple) and everything else."""
 
 
 def _feed(h: Any, obj: object) -> None:
@@ -84,14 +97,10 @@ def _feed(h: Any, obj: object) -> None:
     exact = _EXACT.get(type(obj))
     if exact is not None:
         exact(h, obj)
-    elif obj is None:
-        h.update(b"N;")
-    elif isinstance(obj, bool):
-        h.update(b"T;" if obj else b"F;")
     elif isinstance(obj, int):
-        h.update(f"i{obj};".encode())
+        _feed_int(h, obj)
     elif isinstance(obj, float):
-        h.update(f"f{canonical_float(obj)};".encode())
+        _feed_float(h, obj)
     elif isinstance(obj, complex):
         h.update(f"c{canonical_float(obj.real)},{canonical_float(obj.imag)};".encode())
     elif isinstance(obj, str):
