@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 import warnings
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -95,14 +95,43 @@ def mathieu_or_none(device: Device, ion: int) -> MathieuParameters | None:
     return device.trap.mathieu(device.crystal.species[ion])
 
 
+def _memoized[V](
+    table: dict[tuple[object, ...], tuple[Device, V]],
+    device: Device,
+    key: tuple[object, ...],
+    build: Callable[[], V],
+    limit: int = 4096,
+) -> V:
+    """``build()`` memoized in ``table`` for this device instance: ``key`` carries ``id(device)`` and the entry keeps the
+    device alive, so the id is not reused; a table at ``limit`` entries is emptied first."""
+    entry = table.get(key)
+    if entry is not None and entry[0] is device:
+        return entry[1]
+    value = build()
+    if len(table) >= limit:
+        table.clear()
+    table[key] = (device, value)
+    return value
+
+
+_LAMB_DICKE: dict[tuple[object, ...], tuple[Device, tuple[dict[int, float], bool]]] = {}
+"""Lamb-Dicke parameters by (device identity, ion, delta_k's bytes): the builder asks again on every segment of a run."""
+
+
 def lamb_dicke_parameters(device: Device, ion: int, delta_k: np.ndarray) -> tuple[dict[int, float], bool]:
-    """(eta_{ion, m} for every crystal mode, whether C0 from the trap's Mathieu record was applied)."""
-    params = mathieu_or_none(device, ion)
-    etas = {
-        m: float(device.crystal.lamb_dicke(ion, m, delta_k, micromotion=params))
-        for m in range(len(device.crystal.modes))
-    }
-    return etas, params is not None
+    """(eta_{ion, m} for every crystal mode, whether C0 from the trap's Mathieu record was applied), a new dict each call."""
+    dk = np.ascontiguousarray(delta_k, dtype=float)
+
+    def build() -> tuple[dict[int, float], bool]:
+        params = mathieu_or_none(device, ion)
+        etas = {
+            m: float(device.crystal.lamb_dicke(ion, m, dk, micromotion=params))
+            for m in range(len(device.crystal.modes))
+        }
+        return etas, params is not None
+
+    etas, c0 = _memoized(_LAMB_DICKE, device, (id(device), int(ion), dk.tobytes()), build)
+    return dict(etas), c0
 
 
 def _micromotion(device: Device, ion: int, delta_k: np.ndarray) -> MicromotionIndex | None:
@@ -112,8 +141,26 @@ def _micromotion(device: Device, ion: int, delta_k: np.ndarray) -> MicromotionIn
     return device.trap.micromotion_beta(device.crystal.species[ion], delta_k)
 
 
+_SCATTERING: dict[tuple[object, ...], tuple[Device, ScatteringBudget]] = {}
+"""Scattering budgets by (device identity, ion, beams): every pulse of a run asks again."""
+
+
 def scattering_budget(device: Device, ion: int, beam_indices: Sequence[int]) -> ScatteringBudget:
-    """Rayleigh, spin-flip and leakage rates of both qubit states under the beams, at the ion's position."""
+    """Rayleigh, spin-flip and leakage rates of both qubit states under the beams, at the ion's position, with dicts of its
+    own."""
+    beams = tuple(int(b) for b in beam_indices)
+    hit = _memoized(
+        _SCATTERING, device, (id(device), int(ion), beams), lambda: _scattering_budget(device, ion, beams)
+    )
+    return replace(
+        hit,
+        rayleigh_per_s=dict(hit.rayleigh_per_s),
+        raman_spin_flip_per_s=dict(hit.raman_spin_flip_per_s),
+        leakage_per_s=dict(hit.leakage_per_s),
+    )
+
+
+def _scattering_budget(device: Device, ion: int, beam_indices: Sequence[int]) -> ScatteringBudget:
     st = _structure(device, ion)
     pos = _position(device, ion)
     lower, upper = device.crystal.species[ion].qubit
@@ -195,21 +242,8 @@ def quadrupole_stark_shift_hz(device: Device, ion: int, beam: int) -> float:
 
 
 _DERIVED: dict[tuple[object, ...], tuple[Device, DerivedDrive]] = {}
-"""Derived drives by (kind, device identity, ion, beams, scattering); the device is kept alive so its id is not reused."""
-_DERIVED_MAX = 4096
-
-
-def _memoized(device: Device, key: tuple[object, ...], derive: Callable[[], DerivedDrive]) -> DerivedDrive:
-    """The frozen DerivedDrive of ``key`` for this device instance: the played chain re-derives every drive of every
-    engine run, tens of thousands of times in a GATE_LOCAL tomography."""
-    entry = _DERIVED.get(key)
-    if entry is not None and entry[0] is device:
-        return entry[1]
-    value = derive()
-    if len(_DERIVED) >= _DERIVED_MAX:
-        _DERIVED.clear()
-    _DERIVED[key] = (device, value)
-    return value
+"""Derived drives by (kind, device identity, ion, beams, scattering): the played chain re-derives every drive of every
+engine run, tens of thousands of times in a GATE_LOCAL tomography."""
 
 
 def derive_raman_drive(
@@ -217,7 +251,9 @@ def derive_raman_drive(
 ) -> DerivedDrive:
     """A stimulated-Raman drive of ``ion`` by (beam 1, beam 2): Omega_R, Delta k = k_1 - k_2, etas, Stark shift, scattering."""
     key = ("raman", id(device), int(ion), (int(beams[0]), int(beams[1])), bool(scattering))
-    return _memoized(device, key, lambda: _derive_raman_drive(device, ion, beams, scattering=scattering))
+    return _memoized(
+        _DERIVED, device, key, lambda: _derive_raman_drive(device, ion, beams, scattering=scattering)
+    )
 
 
 def _derive_raman_drive(
@@ -254,7 +290,9 @@ def _derive_raman_drive(
 def derive_optical_drive(device: Device, ion: int, beam: int, *, scattering: bool = True) -> DerivedDrive:
     """A single-photon optical drive (E1, or E2 for an I = 0 quadrupole qubit): Omega from Species.rabi_frequency_hz."""
     key = ("optical", id(device), int(ion), (int(beam),), bool(scattering))
-    return _memoized(device, key, lambda: _derive_optical_drive(device, ion, beam, scattering=scattering))
+    return _memoized(
+        _DERIVED, device, key, lambda: _derive_optical_drive(device, ion, beam, scattering=scattering)
+    )
 
 
 def _derive_optical_drive(device: Device, ion: int, beam: int, *, scattering: bool = True) -> DerivedDrive:

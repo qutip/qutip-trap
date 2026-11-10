@@ -39,7 +39,7 @@ from qutip_trap_app.viewmodel.learn import (
 )
 from qutip_trap_app.viewmodel.presets import PRESETS, PresetResult, PresetSpec
 from qutip_trap_app.views import routes
-from qutip_trap_app.workers import Event, SimulationWorker
+from qutip_trap_app.workers import Event, ProcessTransport, SimulationWorker, Transport
 
 ThemeChoice = Literal["system", "light", "dark"]
 Request = Literal[
@@ -373,11 +373,16 @@ class Session:
     """The worker, the polling loop and the learner's persistence behind a Store (not observable: the store is)."""
 
     def __init__(
-        self, store: Store, provenance: ProvenanceIndex, page: Any = None, preferences: Any = None
+        self,
+        store: Store,
+        provenance: ProvenanceIndex,
+        page: Any = None,
+        preferences: Any = None,
+        transport: Callable[[], Transport] = ProcessTransport,
     ) -> None:
         self.store = store
         self.provenance = provenance
-        self.worker = SimulationWorker()
+        self.worker = SimulationWorker(transport)
         self.page = page
         self.preferences = preferences
         """A ``flet.SharedPreferences`` service; None in tests and headless use, where the learner lives in memory only."""
@@ -853,10 +858,9 @@ class Session:
         with the reason and the worker is restarted for the next request. True when there was something to do."""
         if self.worker.alive or not self.worker.started or not self.store.running():
             return False
-        self._finish_running("failed", "the worker process died")
-        self.store.error = (
-            "the worker process died; its live state is lost (run the job again to re-simulate)"
-        )
+        died = self.worker.failure or "the worker process died"
+        self._finish_running("failed", died)
+        self.store.error = f"{died}; its live state is lost (run the job again to re-simulate)"
         self.worker.start()
         return True
 

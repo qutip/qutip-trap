@@ -42,6 +42,7 @@ from typing import Any, Literal
 import numpy as np
 import qutip as qt
 
+from qutip_trap.dynamics.coefficients import function_coefficient
 from qutip_trap.dynamics.space import HilbertSpace, ModeTruncation
 from qutip_trap.light.beams import Beam
 from qutip_trap.light.recoil import (
@@ -657,8 +658,8 @@ def build_multilevel(
                         "mod_depth": 0.0,
                         "q_index": 0,
                     }
-                    terms.append([op, qt.coefficient(_beat_coefficient, args=args)])
-                    terms.append([op.dag(), qt.coefficient(_beat_coefficient_conj, args=args)])
+                    terms.append([op, function_coefficient(_beat_coefficient, args)])
+                    terms.append([op.dag(), function_coefficient(_beat_coefficient_conj, args)])
             else:
                 mod = beam.modulation
                 approximations.append(
@@ -675,8 +676,8 @@ def build_multilevel(
                         "mod_depth": mod.depth_rad,
                         "q_index": qpol,
                     }
-                    terms.append([op, qt.coefficient(_beat_coefficient, args=args)])
-                    terms.append([op.dag(), qt.coefficient(_beat_coefficient_conj, args=args)])
+                    terms.append([op, function_coefficient(_beat_coefficient, args)])
+                    terms.append([op.dag(), function_coefficient(_beat_coefficient_conj, args)])
     beats = list(frame.beats_rad_s)
     for beam in beams:
         if beam.modulation is not None:

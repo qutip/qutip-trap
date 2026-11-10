@@ -10,7 +10,6 @@ diagram's vertical spacing, is labelled by the page.
 from __future__ import annotations
 
 import dataclasses
-import functools
 import math
 import time
 from collections.abc import Mapping
@@ -216,10 +215,9 @@ class StabilityMap:
     monodromy_calls: int
 
 
-@functools.cache
 def stability_map() -> StabilityMap:
-    """The stability boundary on q in [0, 1] (25 points, bisected to 2e-4), computed once per process: it is
-    device-independent."""
+    """The stability boundary on q in [0, 1] (25 points, bisected to 2e-4). No device changes it and it takes over a
+    thousand monodromy integrations (seconds in a browser), so the worker computes it once and keeps it."""
     q_max, points, tolerance = 1.0, 25, 2e-4
     calls = 0
 
@@ -297,8 +295,8 @@ class TrapLayer:
     notes: tuple[str, ...]
 
 
-def trap_layer(device: core.Device, derived: Mapping[str, float]) -> TrapLayer:
-    """The trap page; ``derived`` is ``Device.derived().values``."""
+def trap_layer(device: core.Device, derived: Mapping[str, float], stability: StabilityMap) -> TrapLayer:
+    """The trap page; ``derived`` is ``Device.derived().values`` and ``stability`` the boundary its diagram draws."""
     trap = device.trap
     sp = device.crystal.species[0]
     notes: list[str] = []
@@ -346,7 +344,7 @@ def trap_layer(device: core.Device, derived: Mapping[str, float]) -> TrapLayer:
         residual_field_v_per_m=residual,
         micromotion_amplitude_m=amp,
         displacement_m=disp,
-        stability=stability_map(),
+        stability=stability,
         ion_height_m=None if height is None else float(height),
         trap_depth_ev=None if depth is None else float(depth),
         notes=tuple(notes),
@@ -1356,13 +1354,15 @@ class DeviceLayer:
 def derive_device_layer(
     preset: core.DevicePreset,
     *,
+    stability: StabilityMap,
     overrides: Mapping[str, float] | None = None,
     table: core.CalibrationTable | None = None,
     table_record: TableRecord | None = None,
     sweeps: bool = True,
     progress: Progress | None = None,
 ) -> DeviceLayer:
-    """The device layer of a built preset: the analytic re-derivation of Section 14.4 in one call."""
+    """The device layer of a built preset: the analytic re-derivation of Section 14.4 in one call. ``stability`` is
+    :func:`stability_map`, which the caller computes once for all devices."""
     t_all = time.perf_counter()
     device = preset.device
     notes: list[str] = []
@@ -1374,7 +1374,7 @@ def derive_device_layer(
     stage("species: levels, hyperfine and Zeeman structure", 0.05)
     species = species_layer(device)
     stage("trap: secular frequencies, Mathieu parameters, the stability boundary", 0.15)
-    trap = trap_layer(device, device.derived().values)
+    trap = trap_layer(device, device.derived().values, stability)
     stage("crystal: equilibrium positions, normal modes, Lamb-Dicke parameters", 0.3)
     crystal = crystal_layer(preset)
     stage("light: Rabi frequencies, light shifts, scattering against detuning", 0.4)

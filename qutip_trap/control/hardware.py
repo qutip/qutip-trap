@@ -31,6 +31,7 @@ electronics, which ``describe`` says.
 
 from __future__ import annotations
 
+import bisect
 import dataclasses
 import math
 from collections.abc import Callable, Sequence
@@ -477,24 +478,51 @@ def _low_pass(samples: np.ndarray, dt: float, tau: float, y0: float) -> np.ndarr
 
 
 def _trains(pulses: Sequence[Pulse]) -> list[list[Pulse]]:
-    """Contiguous pulses on the same ions with the same drive kind and beams (the segments of one gate or composite pulse)."""
+    """Contiguous pulses on the same ions with the same drive kind and beams (the segments of one gate or composite pulse).
+
+    In start order, a pulse joins the earliest-begun train of its signature whose last pulse ends where it starts. A train
+    that ends before the current start can take no later pulse and is dropped from the candidates, so each pulse is
+    compared only with the few trains still open on its signature."""
     ordered = sorted(pulses, key=lambda p: (p.t_start_s, tuple(p.drive.ions)))
     trains: list[list[Pulse]] = []
+    open_by_signature: dict[tuple[object, ...], list[list[Pulse]]] = {}
     for p in ordered:
-        for tr in trains:
-            last = tr[-1]
-            same = (
-                tuple(last.drive.ions) == tuple(p.drive.ions)
-                and last.drive.kind == p.drive.kind
-                and tuple(last.drive.beams) == tuple(p.drive.beams)
-                and len(last.drive.tones) == len(p.drive.tones)
-            )
-            if same and abs(last.t_end_s - p.t_start_s) <= 1e-12 * max(1.0, abs(p.t_start_s)):
+        signature = (tuple(p.drive.ions), p.drive.kind, tuple(p.drive.beams), len(p.drive.tones))
+        tol = 1e-12 * max(1.0, abs(p.t_start_s))
+        candidates = [
+            tr for tr in open_by_signature.get(signature, ()) if tr[-1].t_end_s >= p.t_start_s - tol
+        ]
+        for tr in candidates:
+            if abs(tr[-1].t_end_s - p.t_start_s) <= tol:
                 tr.append(p)
                 break
         else:
             trains.append([p])
+            candidates.append(trains[-1])
+        open_by_signature[signature] = candidates
     return trains
+
+
+def _next_starts(trains: Sequence[Sequence[Pulse]]) -> list[float]:
+    """Per train, the earliest start of a later train on a shared ion that begins once it ends (to 1e-15 s), inf if none.
+    Per ion the trains' starts ascend with their order, so that start is one bisection away."""
+    starts_by_ion: dict[int, list[float]] = {}
+    order_by_ion: dict[int, list[int]] = {}
+    for k, train in enumerate(trains):
+        for ion in set(train[0].drive.ions):
+            starts_by_ion.setdefault(ion, []).append(train[0].t_start_s)
+            order_by_ion.setdefault(ion, []).append(k)
+    out: list[float] = []
+    for k, train in enumerate(trains):
+        end = train[-1].t_end_s - 1e-15
+        best = math.inf
+        for ion in set(train[0].drive.ions):
+            starts, order = starts_by_ion[ion], order_by_ion[ion]
+            j = bisect.bisect_left(starts, end, lo=bisect.bisect_right(order, k))
+            if j < len(starts):
+                best = min(best, starts[j])
+        out.append(best)
+    return out
 
 
 def apply_hardware_chain(
@@ -529,19 +557,14 @@ def apply_hardware_chain(
             f"hardware: {len(trains)} pulse trains jittered with rms {hardware.timing_jitter_s:.3g} s"
         )
     unquantized_callables = 0
+    next_starts = _next_starts(trains)
     for k, train in enumerate(trains):
         ions = set(train[0].drive.ions)
         tau_r = hardware.response_time_s(train[0].drive.kind) if response else 0.0
         tail_s = TAIL_TIME_CONSTANTS * tau_r
         power = stark_scaling_power(train[0].drive.kind)
         # the earliest later pulse start on a shared ion bounds the tail and the shift
-        later = [
-            p.t_start_s
-            for other in trains[k + 1 :]
-            for p in other[:1]
-            if set(p.drive.ions) & ions and p.t_start_s >= train[-1].t_end_s - 1e-15
-        ]
-        next_start = min(later) if later else math.inf
+        next_start = next_starts[k]
         shift = shifts[k]
         if shift > 0.0 and math.isfinite(next_start):
             shift = min(shift, max(next_start - train[-1].t_end_s - tail_s, 0.0))

@@ -14,8 +14,8 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from functools import lru_cache
-from typing import Literal
+from functools import cached_property, lru_cache
+from typing import Literal, NamedTuple
 
 import numpy as np
 from scipy.linalg import expm
@@ -158,6 +158,21 @@ class CountDistribution:
         return float(np.dot(np.arange(len(self.pmf)), self.pmf))
 
 
+class _Exits(NamedTuple):
+    """A class's exits with a positive rate, (target, rate) each, and their total rate."""
+
+    options: tuple[tuple[ReadoutClass, float], ...]
+    total: float
+
+
+class _Cells(NamedTuple):
+    """A record's cells of constant rate: their starts, ends and detected rates (s, s, 1/s)."""
+
+    starts: np.ndarray
+    ends: np.ndarray
+    rates: np.ndarray
+
+
 @dataclass(frozen=True)
 class RecordModel:
     """The chain and the detected rates of one ion: epsilon_sys R_o, R_bg and the (from, to) transition rates."""
@@ -279,15 +294,23 @@ class RecordModel:
             out[n] = rows[:, n * d : (n + 1) * d]
         return out
 
+    @cached_property
+    def _exits(self) -> dict[ReadoutClass, _Exits]:
+        """Per class, the Gillespie step's inputs."""
+        out: dict[ReadoutClass, _Exits] = {}
+        for c in CLASSES:
+            options = tuple((b, r) for (a, b), r in self.rates.items() if a == c and r > 0.0)
+            out[c] = _Exits(options, sum(r for _b, r in options))
+        return out
+
     def sample_path(self, start: ReadoutClass, window_s: float, rng: np.random.Generator) -> ClassPath:
         """Gillespie sampling of the chain: exponential holding times at the total exit rate, targets by rate ratio."""
         t, cls = 0.0, start
         times: list[float] = []
         targets: list[ReadoutClass] = []
-        exits = {c: [(b, r) for (a, b), r in self.rates.items() if a == c and r > 0.0] for c in CLASSES}
+        exits = self._exits
         while True:
-            options = exits[cls]
-            total = sum(r for _b, r in options)
+            options, total = exits[cls]
             if total <= 0.0:
                 break
             dt = rng.exponential(1.0 / total)
@@ -329,7 +352,7 @@ class RecordModel:
         )
         if need_arrivals:
             times: list[np.ndarray] = []
-            for a, b, rate in cells:
+            for a, b, rate in zip(cells.starts.tolist(), cells.ends.tolist(), cells.rates.tolist()):
                 k = rng.poisson(rate * (b - a))
                 if k:
                     times.append(rng.uniform(a, b, size=k))
@@ -341,24 +364,30 @@ class RecordModel:
                 sub = np.histogram(arr, bins=n_bins, range=(0.0, window_s))[0]
             return PhotonRecord(ion, window_s, int(arr.size), sub_bin_s, sub, arr, p)
         # one vectorized Poisson draw over the cells, which draws the same numbers as one scalar draw per cell in order
-        means = np.array([rate * (b - a) for a, b, rate in cells], dtype=float)
+        means = cells.rates * (cells.ends - cells.starts)
         counts = rng.poisson(means) if means.size else np.zeros(0, dtype=int)
         if sub_bin_s is None:
             return PhotonRecord(ion, window_s, int(counts.sum()), None, None, None, p)
         n_bins = int(round(window_s / sub_bin_s))
-        sub = np.zeros(n_bins, dtype=int)
-        index = np.minimum((np.array([a for a, _b, _r in cells]) / sub_bin_s + 1e-9).astype(int), n_bins - 1)
-        np.add.at(sub, index, counts)
+        index = np.minimum((cells.starts / sub_bin_s + 1e-9).astype(int), n_bins - 1)
+        # integer counts summed in float64 are exact far beyond any record's total
+        sub = np.bincount(index, weights=counts, minlength=n_bins).astype(int)
         return PhotonRecord(ion, window_s, int(sub.sum()), sub_bin_s, sub, None, p)
 
 
 @lru_cache(maxsize=64)
-def _sub_bin_edges(window_s: float, sub_bin_s: float) -> frozenset[float]:
-    """The interior sub-bin edges k x sub_bin of a window."""
-    n_bins = int(round(window_s / sub_bin_s))
-    if abs(n_bins * sub_bin_s - window_s) > 1e-9 * window_s:
-        raise ValueError("the window must be an integer number of sub-bins")
-    return frozenset(k * sub_bin_s for k in range(1, n_bins))
+def _cell_grid(window_s: float, sub_bin_s: float | None) -> np.ndarray:
+    """The ascending cell edges 0, k x sub_bin (0 < k < n_bins) and the window (0 and the window alone without a sub-bin),
+    read-only."""
+    if sub_bin_s is None:
+        grid = np.array([0.0, window_s])
+    else:
+        n_bins = int(round(window_s / sub_bin_s))
+        if abs(n_bins * sub_bin_s - window_s) > 1e-9 * window_s:
+            raise ValueError("the window must be an integer number of sub-bins")
+        grid = np.unique(np.concatenate(([0.0, window_s], np.arange(1, n_bins) * sub_bin_s)))
+    grid.flags.writeable = False
+    return grid
 
 
 def _rate_cells(
@@ -368,18 +397,16 @@ def _rate_cells(
     extra_rate: Sequence[tuple[float, float, float]],
     sub_bin_s: float | None,
     window_s: float,
-) -> list[tuple[float, float, float]]:
+) -> _Cells:
     """Refine the path's segments by the sub-bin grid and the extra-rate segments into cells of constant rate."""
-    edges = {0.0, window_s}
-    edges.update(path.jump_times_s)
+    grid = _cell_grid(window_s, sub_bin_s)
+    extra = list(path.jump_times_s)
     for a, b, _r in extra_rate:
-        edges.update((max(a, 0.0), min(b, window_s)))
-    if sub_bin_s is not None:
-        edges.update(_sub_bin_edges(window_s, sub_bin_s))
-    grid = np.asarray(sorted(e for e in edges if 0.0 <= e <= window_s), dtype=float)
+        extra.extend((max(a, 0.0), min(b, window_s)))
+    if extra:
+        inside = [e for e in extra if 0.0 <= e <= window_s]
+        grid = np.unique(np.concatenate((grid, inside)))
     a_arr, b_arr = grid[:-1], grid[1:]
-    keep = b_arr > a_arr
-    a_arr, b_arr = a_arr[keep], b_arr[keep]
     mids = 0.5 * (a_arr + b_arr)
     # the class of each cell from its midpoint, located among the path's (ordered) segment starts
     segments = path.segments()
@@ -389,7 +416,7 @@ def _rate_cells(
     rates = background_per_s + np.where(bright, detected_bright_per_s, 0.0)
     for ea, eb, er in extra_rate:
         rates = np.where((ea <= mids) & (mids < eb), rates + er, rates)
-    return list(zip(a_arr.tolist(), b_arr.tolist(), rates.tolist()))
+    return _Cells(a_arr, b_arr, rates)
 
 
 def apply_detector_nonidealities(

@@ -127,14 +127,18 @@ def test_every_displayed_quantity_of_the_bell_record_has_a_chip(bell: tuple[Reco
     assert [d.kind for d in drills[:4]] == ["status", "chip_tag", "mode_class", "bar_within"]
 
 
-def test_every_displayed_quantity_of_levels_3_and_4_has_a_chip(bell: tuple[Record, LiveRun]) -> None:
+def test_every_displayed_quantity_of_levels_3_and_4_has_a_chip(
+    bell: tuple[Record, LiveRun], stability: device_layer.StabilityMap
+) -> None:
     """The Level 3 dynamics of the recorded trace and the Hamiltonian record, and every Level 4 page over the device layer
     of the record's own device."""
     record, live = bell
     idx = provenance.ProvenanceIndex.load()
     step = next(s.index for s in record.schedule.steps if s.gate_id.startswith("ms"))
     record, ham = resim.hamiltonian_record(record, live, step)
-    layer = device_layer.derive_device_layer(record.job.device.build(), table=live.table, sweeps=False)
+    layer = device_layer.derive_device_layer(
+        record.job.device.build(), stability=stability, table=live.table, sweeps=False
+    )
     views: list[object] = [
         pulse_dynamics(record, recorded_zoom(record, step)),
         hamiltonian_view(record, ham),

@@ -42,6 +42,7 @@ from scipy.special import jv
 
 from qutip_trap.control.pulses import Drive, Pulse, as_time_function, fingerprint_pulse
 from qutip_trap.device.model import Device
+from qutip_trap.dynamics.coefficients import function_coefficient
 from qutip_trap.dynamics.kernels import KernelChoice, prefer_factorized
 from qutip_trap.dynamics.operators import (
     debye_waller_factor,
@@ -755,7 +756,7 @@ def build_hamiltonian(
             trajectory_terms.append(
                 [
                     (0.5 * TWO_PI * space.sigma_z(i)).to("CSR"),
-                    qt.coefficient(_traj_coef, args={"traj": traj, "scale": 1.0}),
+                    function_coefficient(_traj_coef, {"traj": traj, "scale": 1.0}),
                 ]
             )
             approximations.append(
@@ -775,7 +776,7 @@ def build_hamiltonian(
             ):
                 op_rf = op_rf + omegas[m] * space.number(m)
         trajectory_terms.append(
-            [op_rf.to("CSR"), qt.coefficient(_traj_coef, args={"traj": rf_traj, "scale": 1.0})]
+            [op_rf.to("CSR"), function_coefficient(_traj_coef, {"traj": rf_traj, "scale": 1.0})]
         )
         approximations.append(
             f"sampled rf-amplitude trajectory (rms {rf_traj.rms():.3g}) on the transverse modes"
@@ -1086,8 +1087,8 @@ def build_hamiltonian(
                         amp_traj,
                         amp_power,
                     )
-                    t_plain = [op, qt.coefficient(_coef_plain, args={"coef": coef})]
-                    t_conj = [op.dag(), qt.coefficient(_coef_conj, args={"coef": coef})]
+                    t_plain = [op, function_coefficient(_coef_plain, {"coef": coef})]
+                    t_conj = [op.dag(), function_coefficient(_coef_conj, {"coef": coef})]
                     terms.extend([t_plain, t_conj])
                     part.extend([t_plain, t_conj])
                     n_drive_terms += 2
@@ -1157,8 +1158,8 @@ def build_hamiltonian(
                         )
                         shared[id(term_tones)] = tone_sum
                     rotated = _RotatedCoefficient(tone_sum, k_dot_w)
-                    t_plain = [term.op, qt.coefficient(_coef_plain, args={"coef": rotated})]
-                    t_conj = [term.op.dag(), qt.coefficient(_coef_conj, args={"coef": rotated})]
+                    t_plain = [term.op, function_coefficient(_coef_plain, {"coef": rotated})]
+                    t_conj = [term.op.dag(), function_coefficient(_coef_conj, {"coef": rotated})]
                     terms.extend([t_plain, t_conj])
                     part.extend([t_plain, t_conj])
                     n_drive_terms += 2
@@ -1193,8 +1194,8 @@ def build_hamiltonian(
                         dressed=gradient.dressed,
                         continuous=opts.phase_mode == "continuous",
                     )
-                    t_plain = [op, qt.coefficient(_coef_plain, args={"coef": grad_coef})]
-                    t_conj = [op.dag(), qt.coefficient(_coef_conj, args={"coef": grad_coef})]
+                    t_plain = [op, function_coefficient(_coef_plain, {"coef": grad_coef})]
+                    t_conj = [op.dag(), function_coefficient(_coef_conj, {"coef": grad_coef})]
                     terms.extend([t_plain, t_conj])
                     part.extend([t_plain, t_conj])
                     n_drive_terms += 2
@@ -1213,7 +1214,7 @@ def build_hamiltonian(
                 for ion, eps in targets:
                     sz = sz + (abs(eps) ** 2) * space.sigma_z(ion)
                 sc = _ScalarCoefficient(fn, pulse.t_start_s)
-                terms.append([sz.to("CSR"), qt.coefficient(_coef_plain, args={"coef": sc})])
+                terms.append([sz.to("CSR"), function_coefficient(_coef_plain, {"coef": sc})])
                 n_drive_terms += 1
             elif float(st) != 0.0:
                 for ion, eps in targets:

@@ -15,7 +15,9 @@ that imports it; nothing in the core imports the app.
   deeper; `requests.py` - the Level 1 and 2 requests of Section 14.4.
 - `knobs.py`, `device_layer.py` - the Level 4 knobs and the device layer the physics pages read.
 - `presets.py` - the published-experiment presets of Section 14.5.
-- `workers.py` - the worker process that holds the live state and streams progress (in-process under WebAssembly).
+- `workers.py` - the worker that holds the live state and streams progress: a process natively, a second Python runtime
+  in a Web Worker in the browser (`src/assets/simulation-worker.js`); `warm_start.py` - what a packaged build's worker
+  starts from.
 - `app.py` - the page function `main(page)`; `__main__.py` the `qutip-trap-app` command, and `src/main.py` the entry
   point `flet run` and `flet build` look for.
 - `provenance.py` - the index behind the provenance chips and the explain drawer, built from `docs/provenance/ledger.yaml`
@@ -40,16 +42,25 @@ Run the app (the first Run derives the channel library for the device, about a m
 
     cd qutip_trap_app && uv run --project .. flet run --web -p 8550 src/main.py
 
-A checkout builds the provenance index from PLAN.md and the ledger when it is first loaded. A packaged build has no PLAN.md,
-so the index is written into the package before building:
+A checkout builds the provenance index from PLAN.md and the ledger when it is first loaded, and its worker derives every
+calibration table and channel library itself. A packaged build has no PLAN.md, so the index is written into the package
+before building, and with it the warm start: the calibration table, channel library and stability boundary of the
+circuit the app opens on (seconds to derive natively, half a minute in a browser), which its worker starts from:
 
     uv run --package qutip-trap-app python -m qutip_trap_app.provenance   # writes src/qutip_trap_app/provenance_index.json
+    uv run --package qutip-trap-app python -m qutip_trap_app.warm_start   # writes src/qutip_trap_app/warm_start.pkl
     cd qutip_trap_app && uv run --project .. flet build macos              # or windows, linux, web
 
 The GitHub Pages site, https://qutip.org/qutip-trap/, is the static Pyodide build deployed by
 `.github/workflows/pages.yml`: QuTiP 5.3.1 compiled for Pyodide 314 (there is no WebAssembly wheel on PyPI), the core's
-wheel, then `flet build web --python-version 3.14 --base-url /qutip-trap/ --route-url-strategy hash`. In the browser the
-worker runs in-process (`workers.IN_PROCESS`): the page waits for a request instead of streaming its progress.
+wheel, the provenance index and the warm start, then
+`flet build web --python-version 3.14 --base-url /qutip-trap/ --route-url-strategy hash`. A first visit downloads about
+40 MB (the app's package 26 MB, Pyodide 6 MB, the Flutter client 5 MB) behind a boot screen that says so.
+
+A browser has no processes, so there the worker runs in a second Python runtime in a Web Worker: the page's own Python
+stays free to draw progress and answer clicks, and Cancel terminates the Web Worker. The second runtime costs about
+300 MB of memory and no download. With `?worker=inline` in its address the page runs the worker in its own runtime
+instead, and nothing on it moves while a request runs.
 
 The `flet test` flows (`tests/test_main.py`) drive the rendered controls by their keys. They need the Flutter test host (on
 macOS the full Xcode) and are skipped unless `QUTIP_TRAP_APP_UI_TESTS=1`:

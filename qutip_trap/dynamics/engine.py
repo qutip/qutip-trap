@@ -28,7 +28,13 @@ from qutip_trap.dynamics.channels import CollapseOp, RecoilOption
 from qutip_trap.dynamics.evolve import Rung, evolve, ladder, retry_note
 from qutip_trap.dynamics.operators import _highest_populated, _thermal_levels, required_margin
 from qutip_trap.dynamics.parallel import worker_count
-from qutip_trap.dynamics.rotating import RotatingSegment, _diagonal_energies, eigen_frequency, rotating_frame
+from qutip_trap.dynamics.rotating import (
+    RotatingSegment,
+    _diagonal_energies,
+    batched_drive,
+    eigen_frequency,
+    rotating_frame,
+)
 from qutip_trap.options import Numerics
 
 if TYPE_CHECKING:
@@ -657,7 +663,6 @@ class JointExactEngine:
         static_ops, pulse_channels_possible = self._collapse_setup(device, space)
         lindblad = _lindblad_method(options, space.dimension)
         map_kind = options.map
-        n_workers = worker_count(options)
         workers_used = 1
         map_used = "serial"
         propagator_solves = 0
@@ -713,6 +718,7 @@ class JointExactEngine:
         pulse_total = sum(1 for _a, _b, act in segments_of_run if act)
         pulse_done = 0
         progress_started = time.perf_counter()
+        idle_built: BuiltHamiltonian | None = None
         for seg_index, (a, b, active) in enumerate(segments_of_run):
             seg_started = time.perf_counter()
             dissipative_seg = bool(static_ops) or (bool(active) and pulse_channels_possible)
@@ -720,15 +726,21 @@ class JointExactEngine:
             bopts_seg = (
                 replace(bopts, kernel="assembled") if (mesolve_seg and bopts.kernel != "assembled") else bopts
             )
-            built = build_hamiltonian(
-                device,
-                active,
-                space,
-                sample=sample,
-                options=bopts_seg,
-                qubit_shifts_hz=self.qubit_shifts_hz,
-                frozen_n=frozen_n,
-            )
+            if active or idle_built is None:
+                built = build_hamiltonian(
+                    device,
+                    active,
+                    space,
+                    sample=sample,
+                    options=bopts_seg,
+                    qubit_shifts_hz=self.qubit_shifts_hz,
+                    frozen_n=frozen_n,
+                )
+                if not active:
+                    idle_built = built
+            else:
+                # every idle segment of a run has one Hamiltonian, H_mot + H_int under the run's sample
+                built = idle_built
             seg_ops = self._segment_channels(device, active, space, built, static_ops, notes)
             c_ops = [c.op for c in seg_ops]
             times = self._segment_times(a, b)
@@ -804,7 +816,7 @@ class JointExactEngine:
                 new_kets = []
                 for psi, w_k in zip(kets, weights):
                     ev = evolve(
-                        built.H if rot is None else rot.H,
+                        batched_drive(built.H, space.dims) if rot is None else rot.H,
                         psi if rot is None else rot.frame.to_frame(psi, float(times[0])),
                         times,
                         e_ops=e_ops,
@@ -857,7 +869,7 @@ class JointExactEngine:
                 improved_seg = improved_run and len(kets) == 1
                 n_traj_seg = options.ntraj
                 rungs = ladder(options, built.omega_max_rad_s or None)
-                h_mc = built.H if rot is None else rot.H
+                h_mc = batched_drive(built.H, space.dims) if rot is None else rot.H
                 c_mc = c_ops if rot is None else list(rot.c_ops)
                 mc_opts = {
                     "rtol": options.rtol,
@@ -905,6 +917,7 @@ class JointExactEngine:
                     weights = [1.0 / n_traj_seg] * n_traj_seg
                 n_stoch = n_traj_seg if improved_seg else len(kets)
                 # one worker runs in-process: a one-process pool would still fork a copy of this process per segment
+                n_workers = worker_count(options) if n_stoch > 1 else 1
                 seg_map = map_kind if (n_stoch > 1 and n_workers > 1) else "serial"
                 seg_workers = min(n_workers, n_stoch) if seg_map != "serial" else 1
                 mc_opts["map"], mc_opts["num_cpus"] = seg_map, seg_workers

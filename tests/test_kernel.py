@@ -19,7 +19,8 @@ from qutip_trap.dynamics.engine import JointExactEngine, SeedSpec
 from qutip_trap.dynamics.hamiltonian import BuilderOptions, build_hamiltonian
 from qutip_trap.dynamics.kernels import (
     FactorizedOperator,
-    _ApplicationPlan,
+    _Batch,
+    _Single,
     factorized_qobj,
     kernel_costs_us,
     prefer_factorized,
@@ -157,21 +158,25 @@ def test_hilbert_space_factorized_drive_operator_is_the_assembled_one_and_refuse
 
 
 def test_cost_model_reproduces_the_measured_crossover_of_section_11_1() -> None:
-    """The cost model assembles at dimensions 48 and 256 and factorizes from the 440-dimensional Bell space up, never without a
-    mode factor; the assembled cost at 2048 is 0.5 + 0.57e-3 x nnz us."""
+    """The cost model holds a single mode of a few dozen states assembled and factorizes every space with two resolved
+    modes or more, from the 144-dimensional (2, 2, 6, 6) up, never without a mode factor; a register's batch costs its
+    gathered elements, and the assembled cost at 2048 is the per-term and per-non-zero formula."""
     assert not prefer_factorized((2, 2, 12), 0, [2])
-    assert not prefer_factorized((2, 2, 8, 8), 0, [2, 3])
-    assert prefer_factorized((2, 2, 10, 11), 0, [2, 3])
+    assert not prefer_factorized((2, 2, 20), 0, [2])
+    assert prefer_factorized((2, 2, 6, 6), 0, [2, 3])
+    assert prefer_factorized((2, 2, 8, 10), 0, [2, 3])
     assert prefer_factorized((2, 2, 6, 6, 6), 0, [2, 3, 4])
     assert prefer_factorized((2, 2, 8, 8, 8), 0, [2, 3, 4])
     assert prefer_factorized((2, 2, 2, 2, 8, 8, 8), 3, [4, 5, 6])
     assert not prefer_factorized((2, 2, 8, 8, 8), 0, []), (
         "a carrier on an all-frozen space has no mode factor"
     )
-    a48, f48 = kernel_costs_us((2, 2, 12), 0, [2])
-    a2048, f2048 = kernel_costs_us((2, 2, 8, 8, 8), 0, [2, 3, 4])
+    a48, f48 = kernel_costs_us((2, 2, 12), [0], [2])
+    a2048, f2048 = kernel_costs_us((2, 2, 8, 8, 8), [0, 1], [2, 3, 4])
     assert a48 < f48 and f2048 < a2048 / 10.0
-    assert a2048 == pytest.approx(0.5 + 0.57e-3 * 524288, rel=1e-12)
+    assert a2048 == pytest.approx(2.41 + 4 * (0.25 + 0.45e-3 * 1024 * 512), rel=1e-12)
+    # two products of the middle mode per level of the leading mode and the other ion, per term
+    assert f2048 == pytest.approx(3.21 + 6.47e-3 * 4 * 1024 + 0.086 * 4 * 8 * 2, rel=1e-12)
 
 
 @pytest.fixture(scope="module")
@@ -396,10 +401,10 @@ def _counted_coefficient(t: float, Om: float, mu: float, tag: object = None) -> 
 # per evaluation) on the reference machine. The evaluation counts are set by the integrator's arithmetic; the costs are
 # the machine's, so only their ratio is compared.
 REFERENCE_ROWS = {
-    (1, 12): (19283, 13.2, 1.9),
-    (2, 8): (21067, 21.5, 16.7),
-    (3, 6): (24366, 45.4, 195.2),
-    (3, 8): (35177, 89.5, 1207.9),
+    (1, 12): (19283, 11.9, 1.9),
+    (2, 8): (21067, 22.5, 16.8),
+    (3, 6): (24366, 36.8, 195.2),
+    (3, 8): (35177, 58.3, 1206.9),
 }
 
 
@@ -440,18 +445,19 @@ def test_section_11_1_rows_factorized_against_assembled_final_states_and_cost(mo
     of the reference machine's, and the crossover holds."""
     plan_calls = [0]
     assemblies = [0]
-    transform = _ApplicationPlan._transform
+    # QuTiP dispatches every term of this list-form QobjEvo on its own: each application is a lone term's
+    apply = _Single.apply
     to_array = FactorizedOperator.to_array
 
-    def counted_transform(plan, *args, **kwargs):
+    def counted_apply(single, *args, **kwargs):
         plan_calls[0] += 1
-        return transform(plan, *args, **kwargs)
+        return apply(single, *args, **kwargs)
 
     def counted_to_array(op):
         assemblies[0] += 1
         return to_array(op)
 
-    monkeypatch.setattr(_ApplicationPlan, "_transform", counted_transform)
+    monkeypatch.setattr(_Single, "apply", counted_apply)
     monkeypatch.setattr(FactorizedOperator, "to_array", counted_to_array)
     walls: dict[tuple[int, int, bool], float] = {}
     per_eval: dict[tuple[int, int, bool], float] = {}
@@ -493,9 +499,9 @@ def test_section_11_1_rows_factorized_against_assembled_final_states_and_cost(mo
                 # an application slices the ion factor and runs one dense product per mode factor on the D/2 amplitudes
                 # of the source level
                 for term in (el[0].data for el in h.to_list() if isinstance(el, list)):
-                    steps = term._plan.steps
-                    assert [kind for kind, *_rest in steps] == ["dense"] * nmodes, (nmodes, nmax)
-                    macs = sum(lead * d * d * trail for _kind, lead, d, trail, *_mats in steps)
+                    assert [kind for _f, kind, _m in term.term.steps] == ["dense"] * nmodes, (nmodes, nmax)
+                    ops = _Batch([term.term]).ops(1)
+                    macs = sum(lead * d * d * trail for _code, lead, d, trail in ops)
                     assert macs == psi0.shape[0] // 2 * nmodes * nmax, (nmodes, nmax, macs)
         assert (finals[True] - finals[False]).norm() < 2e-7, (nmodes, nmax)
         n_ref, us_fact, us_csr = REFERENCE_ROWS[(nmodes, nmax)]

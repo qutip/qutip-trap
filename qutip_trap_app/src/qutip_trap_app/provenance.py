@@ -111,6 +111,12 @@ def generate_index() -> dict[str, Any]:
 # ---- run-time lookups ------------------------------------------------------------------------------------------------------------
 
 
+def in_checkout() -> bool:
+    """Whether this runs from a checkout of the repository rather than a packaged build, which carries no PLAN.md and
+    ships what a checkout generates."""
+    return (repository_root() / "PLAN.md").exists()
+
+
 @dataclass(frozen=True)
 class Chip:
     """What a provenance chip shows: the tag with its glyph and meaning, the section, the source, the equation and the
@@ -162,8 +168,8 @@ class ProvenanceIndex:
 
     @classmethod
     def load(cls) -> ProvenanceIndex:
-        """The index of this checkout's PLAN.md and ledger, or the shipped asset in a packaged build (no PLAN.md)."""
-        if (repository_root() / "PLAN.md").exists():
+        """The index of this checkout's PLAN.md and ledger, or the shipped asset in a packaged build."""
+        if in_checkout():
             return cls(generate_index())
         return cls(json.loads(ASSET_PATH.read_text(encoding="utf-8")))
 

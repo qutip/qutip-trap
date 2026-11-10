@@ -1,28 +1,34 @@
-"""The simulation worker: core calls in a separate process, progress and results streamed back (PLAN.md Section 14.6).
+"""The simulation worker: core calls off the UI's thread, progress and results streamed back (PLAN.md Section 14.6).
 
 One long-lived worker holds the live state a record cannot carry (the device, the calibration table, the core's run record,
 the channel library) keyed by the record's run key, so that a zoom or a verify-deeper request needs no re-run. Requests and
 results are picklable values; progress events name a stage, a fraction where one is known and a message. A cancel terminates
-the process and restarts it: the caches live in the records the UI keeps, so only the live handles are lost. The process is
-not daemonic, so the core's own parallel maps may spawn inside it; under WebAssembly (no processes) a request runs in the
-page's thread when it is submitted.
+the worker and restarts it: the caches live in the records the UI keeps, so only the live handles are lost.
+
+Where the worker runs is its :class:`Transport`, chosen once where the application starts (:func:`platform_transport`): a
+spawned process natively (not daemonic, so the core's own parallel maps may spawn inside it), and in the browser, which has
+no processes, a second Python runtime in a Web Worker, or the page's own runtime for a device that cannot hold two.
 """
 
 from __future__ import annotations
 
+import asyncio
 import multiprocessing as mp
+import pickle
 import queue
 import sys
 import time
 import traceback
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import Any, Literal
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Any, Literal, Protocol
 
 from qutip_trap_app import core, resim
 from qutip_trap_app import device_layer as layer_mod
 from qutip_trap_app import presets as presets_mod
+from qutip_trap_app.provenance import in_checkout
 from qutip_trap_app.record import (
     DeviceRef,
     JobSpec,
@@ -64,10 +70,6 @@ class WorkerError(RuntimeError):
     """A request failed in the worker; the message carries the worker's traceback."""
 
 
-IN_PROCESS = sys.platform == "emscripten"
-"""WebAssembly has no processes: a request runs in the page's own thread at ``submit`` time, its events read afterwards."""
-
-
 # ---- the requests ---------------------------------------------------------------------------------------------------------------
 
 
@@ -81,6 +83,44 @@ class _LiveState:
     """Built presets per ``DeviceRef.cache_key()`` (a build with the recipe re-derived takes seconds)."""
     tables: dict[str, core.CalibrationTable] = field(default_factory=dict)
     """The latest calibration table per device hash (the device layer compares its solutions with it)."""
+    stability: layer_mod.StabilityMap | None = None
+    """The Mathieu stability boundary every trap page draws, computed by the first derive."""
+
+
+WARM_START_PATH = Path(__file__).resolve().with_name("warm_start.pkl")
+"""The warm start a packaged build ships, written by ``python -m qutip_trap_app.warm_start``."""
+
+
+@dataclass(frozen=True)
+class WarmStart:
+    """What one worker derived, for a later worker to start from: its state without the records and live runs, and the
+    calibration reports its tables were read from, which the core caches per process. Every entry is keyed by what it
+    was derived from (the preset's arguments, the device hash, the seed, the numerics), so a request for anything else
+    derives its own; the stability boundary is the same for every device."""
+
+    state: _LiveState
+    calibration: dict[str, object]
+    """The core's calibration reports by cache key (``core.CALIBRATION_CACHE``)."""
+
+    @classmethod
+    def after(cls, *requests: tuple[str, dict[str, Any]]) -> WarmStart:
+        """What a worker that started with nothing holds once it has answered ``requests`` (a name and a payload each),
+        in this process, whose calibration cache the reports are read from."""
+        state = _LiveState()
+        for request, payload in requests:
+            HANDLERS[request](state, lambda stage, fraction, message: None, **payload)
+        return cls(replace(state, records={}, lives={}), dict(core.CALIBRATION_CACHE.reports))
+
+
+def initial_state() -> _LiveState:
+    """The state a worker starts with: nothing in a checkout, where every derivation runs on the code as it stands; the
+    warm start in a packaged build, where the first Run and the first physics page of the device the app opens on then
+    derive nothing (in a browser, half a minute and five seconds less)."""
+    if in_checkout():
+        return _LiveState()
+    warm: WarmStart = pickle.loads(WARM_START_PATH.read_bytes())
+    core.CALIBRATION_CACHE.reports.update(warm.calibration)
+    return warm.state
 
 
 def _preset_for(state: _LiveState, ref: DeviceRef, progress: Progress) -> core.DevicePreset:
@@ -212,8 +252,12 @@ def _derive(
     sweeps: bool = True,
 ) -> layer_mod.DeviceLayer:
     preset = _preset_for(state, device, progress)
+    if state.stability is None:
+        progress("deriving", 0.0, "the Mathieu stability boundary, once for all devices")
+        state.stability = layer_mod.stability_map()
     return layer_mod.derive_device_layer(
         preset,
+        stability=state.stability,
         overrides=device.overrides,
         table=state.tables.get(preset.device.hash()),
         table_record=table_record,
@@ -297,13 +341,13 @@ _Item = tuple[str, str, Callable[..., Any], dict[str, Any]]
 """(ticket id, request name, handler, payload)."""
 
 
-def _run(state: _LiveState, results: Any, item: _Item) -> None:
-    """One request: its progress events, then its result or its error, on ``results``."""
+def _run(state: _LiveState, emit: Callable[[Event], None], item: _Item) -> None:
+    """One request: its progress events, then its result or its error, each handed to ``emit``."""
     ticket, request, handler, payload = item
     t0 = time.perf_counter()
 
     def progress(stage: str, fraction: float | None, message: str) -> None:
-        results.put(
+        emit(
             Event(
                 "progress",
                 ticket,
@@ -317,9 +361,9 @@ def _run(state: _LiveState, results: Any, item: _Item) -> None:
 
     try:
         value = handler(state, progress, **payload)
-        results.put(Event("result", ticket, request, payload=value, wall_time_s=time.perf_counter() - t0))
+        emit(Event("result", ticket, request, payload=value, wall_time_s=time.perf_counter() - t0))
     except Exception:
-        results.put(
+        emit(
             Event(
                 "error", ticket, request, message=traceback.format_exc(), wall_time_s=time.perf_counter() - t0
             )
@@ -327,13 +371,38 @@ def _run(state: _LiveState, results: Any, item: _Item) -> None:
 
 
 def _worker_main(requests: Any, results: Any) -> None:
-    state = _LiveState()
+    state = initial_state()
     while (item := requests.get()) is not None:
-        _run(state, results, item)
+        _run(state, results.put, item)
 
 
-class _ProcessTransport:
+class Transport(Protocol):
+    """Where the worker's requests run. ``results`` is a queue of :class:`Event`, read with ``get`` and ``get_nowait``."""
+
+    results: Any
+
+    @property
+    def alive(self) -> bool:
+        """Whether requests put now will be answered."""
+
+    @property
+    def failure(self) -> str:
+        """Why the transport stopped answering, where it knows; empty otherwise."""
+
+    def put(self, item: _Item) -> None:
+        """Queue one request; its events arrive on ``results``."""
+
+    def stop(self, timeout_s: float) -> None:
+        """End the worker; a transport that can wait gives the request in flight up to ``timeout_s`` to finish."""
+
+    def kill(self) -> None:
+        """End the worker now, whatever it is doing."""
+
+
+class ProcessTransport:
     """The worker in a spawned, non-daemonic process."""
+
+    failure = ""
 
     def __init__(self) -> None:
         ctx = mp.get_context("spawn")
@@ -366,17 +435,26 @@ class _ProcessTransport:
             self.process.join(2.0)
 
 
-class _InProcessTransport:
-    """The worker in the page's own thread: a request runs when it is submitted, its events wait in a queue."""
+INLINE_START_DELAY_S = 0.1
+"""How long an inline request waits before it holds the event loop: the renders its submission caused are sent first, so
+the screen shows the job as running."""
+
+
+class InlineTransport:
+    """The worker on the caller's own event loop: one Python runtime instead of two (about 300 MB less in a browser),
+    and nothing else runs while a request does, so no progress arrives, no click is answered and a cancel cannot
+    interrupt. A request starts ``INLINE_START_DELAY_S`` after it is put, never inside ``put``."""
 
     alive = True
+    failure = ""
 
     def __init__(self) -> None:
-        self.state = _LiveState()
+        self.state = initial_state()
         self.results: Any = queue.Queue()
+        self._loop = asyncio.get_running_loop()
 
     def put(self, item: _Item) -> None:
-        _run(self.state, self.results, item)
+        self._loop.call_later(INLINE_START_DELAY_S, _run, self.state, self.results.put, item)
 
     def stop(self, timeout_s: float) -> None:
         return None
@@ -385,11 +463,106 @@ class _InProcessTransport:
         return None
 
 
-class SimulationWorker:
-    """One worker; submit requests, poll events, or wait for one ticket."""
+WEB_WORKER_SCRIPT = "simulation-worker.js"
+"""The simulation worker's script (``src/assets``), served beside the script of the worker that runs the page's Python."""
+
+
+def _post(target: Any, value: object) -> None:
+    """``value`` across a Web Worker's boundary as a pickle: to the worker ``target``, or, from inside one (``target``
+    its own scope), to the page."""
+    from pyodide.ffi import to_js
+
+    target.postMessage(to_js(pickle.dumps(value)))
+
+
+class WebWorkerTransport:
+    """The worker in a second Python runtime, in a Web Worker started from the one that runs the page's Python: the
+    browser's stand-in for a process. Requests and events cross as pickles, and ``kill`` terminates the Web Worker.
+
+    The script boots the runtime from the two URLs the page's own was booted from (both in the browser's cache by then)
+    and hands over to :func:`serve_web_worker`; requests put meanwhile wait for the boot. A failure of the script or the
+    boot arrives as ``failure``, and the transport is no longer alive."""
 
     def __init__(self) -> None:
-        self._transport: _ProcessTransport | _InProcessTransport | None = None
+        import js
+        from pyodide.ffi import create_proxy, to_js
+
+        self.results: Any = queue.Queue()
+        self.failure = ""
+        self._callbacks = (create_proxy(self._on_message), create_proxy(self._on_error))
+        self._worker: Any = js.Worker.new(WEB_WORKER_SCRIPT, type="module")
+        self._worker.onmessage, self._worker.onerror = self._callbacks
+        # Flet's worker script keeps the two URLs on its global scope, relative to its own address
+        here = js.location.href
+        boot = {
+            "pyodideUrl": js.URL.new(js.pyodideUrl, here).href,
+            "appPackageUrl": js.URL.new(js.appPackageUrl, here).href,
+        }
+        self._worker.postMessage(to_js(boot, dict_converter=js.Object.fromEntries))
+
+    @property
+    def alive(self) -> bool:
+        return self._worker is not None and not self.failure
+
+    def _on_message(self, message: Any) -> None:
+        data = message.data
+        if isinstance(data, str):
+            self.failure = data
+        else:
+            self.results.put(pickle.loads(data.to_py()))
+
+    def _on_error(self, error: Any) -> None:
+        self.failure = f"the simulation worker's script failed: {error.message}"
+
+    def put(self, item: _Item) -> None:
+        _post(self._worker, item)
+
+    def stop(self, timeout_s: float) -> None:
+        self.kill()
+
+    def kill(self) -> None:
+        if self._worker is None:
+            return
+        self._worker.terminate()
+        self._worker = None
+        for callback in self._callbacks:
+            callback.destroy()
+
+
+def serve_web_worker() -> Callable[[Any], None]:
+    """Inside the simulation Web Worker, called once by its script: the function the script hands each pickled request
+    to. The request's events are posted to the page as they happen, so progress arrives during a solve."""
+    import js
+
+    state = initial_state()
+
+    def answer(request: Any) -> None:
+        _run(state, lambda event: _post(js, event), pickle.loads(request.to_py()))
+
+    return answer
+
+
+IN_BROWSER = sys.platform == "emscripten"
+"""Whether this Python runs under WebAssembly in a browser, which has Web Workers and no processes."""
+
+
+def platform_transport() -> Callable[[], Transport]:
+    """The transport of this platform, resolved once where the application starts: a process natively; in a browser a
+    Web Worker, or the page's own runtime when the page's address asks ``?worker=inline``."""
+    if not IN_BROWSER:
+        return ProcessTransport
+    import js
+
+    inline = js.URL.new(js.documentUrl).searchParams.get("worker") == "inline"
+    return InlineTransport if inline else WebWorkerTransport
+
+
+class SimulationWorker:
+    """One worker on the given transport; submit requests, poll events, or wait for one ticket."""
+
+    def __init__(self, transport: Callable[[], Transport] = ProcessTransport) -> None:
+        self._new_transport = transport
+        self._transport: Transport | None = None
         self._buffer: list[Event] = []
 
     @property
@@ -401,9 +574,16 @@ class SimulationWorker:
         """Whether a worker was started and not deliberately stopped; with ``alive`` False this means it died."""
         return self._transport is not None
 
+    @property
+    def failure(self) -> str:
+        """Why a started worker is no longer alive, when its transport knows."""
+        return "" if self._transport is None else self._transport.failure
+
     def start(self) -> None:
         if not self.alive:
-            self._transport = _InProcessTransport() if IN_PROCESS else _ProcessTransport()
+            if self._transport is not None:
+                self._transport.kill()  # it died: release what it still holds
+            self._transport = self._new_transport()
 
     def stop(self, timeout_s: float = 5.0) -> None:
         if self._transport is not None:
