@@ -6,7 +6,7 @@ A first-principles trapped-ion quantum computer simulator built on [QuTiP](https
 
 A run holds the ions in a trap and solves for their crystal and motional modes, cools and optically pumps them, compiles the circuit to the native gates (GPi, GPi2, Mølmer-Sørensen, ZZ, virtual RZ), schedules laser pulses from a calibration performed on the simulated device, integrates every pulse on the joint qubit-plus-motion state under the spin-motion Hamiltonian with noise channels whose rates follow from the device parameters, and reads the ions out by state-dependent fluorescence. Every `Result` states which fidelity level ran, which Hilbert space was integrated and every approximation that was made.
 
-The Flet application runs in the browser at https://qutip.org/qutip-trap/ (Python and QuTiP compiled to WebAssembly; the first load fetches about 60 MB).
+The Flet application runs in the browser at https://qutip.org/qutip-trap/ (Python and QuTiP compiled to WebAssembly; the first load fetches about 40 MB).
 
 ## Install
 
