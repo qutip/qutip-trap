@@ -33,6 +33,8 @@ RAIL_WIDTH = 84
 DRAWER_WIDTH = 380
 CONTENT_MAX_WIDTH = 1280
 """Wider windows centre the content column so that reading measures stay sane on a large display."""
+TOOLTIP_MAX_WIDTH = 440
+"""A tooltip's widest line: about 66 characters of its 12 px text."""
 
 SIZE_TITLE = 24
 SIZE_CARD_TITLE = 15
@@ -333,6 +335,8 @@ def build_theme(dark: bool) -> ft.Theme:
             padding=ft.Padding.symmetric(horizontal=10, vertical=8),
             margin=ft.Margin.all(GAP),
             wait_duration=ft.Duration(milliseconds=350),
+            # a card's notes are sentences: they wrap at a reading measure instead of running the window's width
+            size_constraints=ft.BoxConstraints(min_height=24, max_width=TOOLTIP_MAX_WIDTH),
         ),
         divider_theme=ft.DividerTheme(color=t.outline_variant, thickness=1, space=1),
         data_table_theme=ft.DataTableTheme(

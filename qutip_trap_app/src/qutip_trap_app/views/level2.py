@@ -34,6 +34,7 @@ from qutip_trap_app.views.common import (
     ions_text,
     level_header,
     not_in_record,
+    page_scroll,
     pill,
     stat_row,
     stat_tile,
@@ -203,7 +204,7 @@ def _closure_card(
             gate_id,
             "detuning",
             lambda khz: request_detuning(record, gate_id, khz * 1e3),
-            field_label="offset (kHz)",
+            field_label="Offset (kHz)",
             default="5",
             width=120,
             button="Set the detuning by hand",
@@ -338,7 +339,7 @@ def Level2Page(
     envelope = drawing.line_chart(
         [(f"tone {t.index}", t.times_s * 1e6, t.envelope_samples / 1e3) for t in pv.tones],
         x_title="t (µs)",
-        y_title="Omega/2pi (kHz)",
+        y_title="Ω/2π (kHz)",
         height=130,
     )
     pulse_card = card(
@@ -373,7 +374,7 @@ def Level2Page(
     right: list[ft.Control] = []
     if any(g.gate_id == name.piece for g in record.schedule.gates):
         right.append(_closure_card(store, session, record, name.piece, index))
-    return ft.Column(
+    return page_scroll(
         [
             level_header("The schedule", "What light hit which ion, when, and what did it talk to?"),
             spectrum_card,
@@ -385,7 +386,4 @@ def Level2Page(
             ),
             columns(store, page, 2, [pulse_card], right),
         ],
-        spacing=16,
-        expand=True,
-        scroll=ft.ScrollMode.AUTO,
     )

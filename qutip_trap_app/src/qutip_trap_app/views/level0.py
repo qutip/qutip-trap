@@ -26,6 +26,7 @@ from qutip_trap_app.views.builder import CircuitBuilder, builder_toolbar
 from qutip_trap_app.views.common import (
     HAIRLINE,
     MUTED,
+    PageScroller,
     ProgressRows,
     card,
     columns,
@@ -36,6 +37,8 @@ from qutip_trap_app.views.common import (
     input_style,
     kv_rows,
     level_header,
+    page_scroll,
+    scroll_page,
     shown,
     stat_row,
     stat_tile,
@@ -98,7 +101,7 @@ def CircuitEditor(store: Store, session: Session, index: ProvenanceIndex) -> ft.
     controls = ft.Row(
         [
             ft.TextField(
-                label="shots",
+                label="Shots",
                 value=str(store.shots) if typed.current is None else typed.current,
                 width=96,
                 input_filter=ft.NumbersOnlyInputFilter(),
@@ -110,7 +113,7 @@ def CircuitEditor(store: Store, session: Session, index: ProvenanceIndex) -> ft.
                 **input_style(),
             ),
             ft.Dropdown(
-                label="engine",
+                label="Engine",
                 value=store.engine.key,
                 options=[
                     ft.DropdownOption(key="replay", text="Channel replay · fast, derived"),
@@ -122,7 +125,7 @@ def CircuitEditor(store: Store, session: Session, index: ProvenanceIndex) -> ft.
                 **input_style(),
             ),
             ft.Dropdown(
-                label="readout",
+                label="Readout",
                 value=store.run_readout(),
                 options=[
                     ft.DropdownOption(key="fast", text="Fast · bits only"),
@@ -135,7 +138,7 @@ def CircuitEditor(store: Store, session: Session, index: ProvenanceIndex) -> ft.
                 **input_style(),
             ),
             ft.Dropdown(
-                label="load",
+                label="Example circuit",
                 value=store.active_preset or "bell",
                 options=[ft.DropdownOption(key="bell", text="Bell example")]
                 + [ft.DropdownOption(key=p.id, text=p.title) for p in circuit_presets()],
@@ -190,7 +193,7 @@ def PredictionCard(store: Store, session: Session) -> ft.Control:
     labels = {
         "ideal": f"the outcomes {top}",
         "uniform": "every outcome equally likely",
-        "zero": "everything stays in |0...0>",
+        "zero": "everything stays in |0…0⟩",
     }
     return card(
         "Before you run: which histogram do you expect?",
@@ -267,10 +270,26 @@ def _legend() -> ft.Control:
     )
 
 
+# Flet's key classes take their constructor from a decorator applied lazily (an import cycle of Flet's), which mypy
+# does not see through
+SHOTS_KEY = ft.ScrollKey("shots")  # type: ignore[call-arg]
+"""The shots panel's key: a bar opens the panel under the histogram's tiles, and the page scrolls to it."""
+
+
 @ft.component
-def ShotsPanel(store: Store, record: Record, h: Histogram, index: ProvenanceIndex) -> ft.Control:
+def ShotsPanel(
+    store: Store, record: Record, h: Histogram, index: ProvenanceIndex, scroller: PageScroller
+) -> ft.Control:
     ft.use_state(store)
+    page = ft.context.page
     key = store.selected_bar
+
+    def reveal() -> None:
+        if key is not None:
+            scroll_page(page, scroller, to=SHOTS_KEY)
+
+    # a bar opens its shots below the histogram's tiles, which on most windows is below the fold
+    ft.use_effect(reveal, dependencies=[key])
     if key is None:
         return ft.Container()
     bar = next((b for b in h.bars if b.key == key), None)
@@ -354,12 +373,14 @@ def ShotsPanel(store: Store, record: Record, h: Histogram, index: ProvenanceInde
         border_radius=ft.BorderRadius.all(theme.RADIUS_TILE),
         bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
         border=ft.Border.all(1, HAIRLINE),
-        key="shots",
+        key=SHOTS_KEY,
     )
 
 
 @ft.component
-def ResultsPanel(store: Store, session: Session, record: Record, index: ProvenanceIndex) -> ft.Control:
+def ResultsPanel(
+    store: Store, session: Session, record: Record, index: ProvenanceIndex, scroller: PageScroller
+) -> ft.Control:
     ft.use_state(store)
     h = histogram(record)
     key = record.key()
@@ -383,7 +404,7 @@ def ResultsPanel(store: Store, session: Session, record: Record, index: Provenan
         body.append(
             ft.Container(
                 content=ft.Text(
-                    f"your pick against the histogram: total variation {score.total_variation:.2f}; {score.feedback}",
+                    f"Your pick against the histogram: total variation {score.total_variation:.2f}; {score.feedback}",
                     size=theme.SIZE_SMALL,
                 ),
                 bgcolor=ft.Colors.SECONDARY_CONTAINER,
@@ -395,7 +416,7 @@ def ResultsPanel(store: Store, session: Session, record: Record, index: Provenan
     body.append(ft.Row([_legend()], alignment=ft.MainAxisAlignment.END))
     body.append(tile_row((h.shots, h.target_distance, h.largest_deviation), index))
     body.append(hint(store, 0, "histogram"))
-    body.append(ShotsPanel(store, record, h, index))
+    body.append(ShotsPanel(store, record, h, index, scroller))
     if store.active_preset and record.job.label == f"preset: {store.active_preset}":
         spec = PRESETS[store.active_preset]
         comps = circuit_comparisons(
@@ -449,7 +470,7 @@ def ResultsPanel(store: Store, session: Session, record: Record, index: Provenan
 
             detail_controls.append(
                 ft.TextButton(
-                    content=ft.Text("open the deeper run"),
+                    content=ft.Text("Open the deeper run"),
                     on_click=lambda e, k=deep_key: ft.context.page.navigate(routes.job(k)),
                 )
             )
@@ -563,6 +584,22 @@ def Level0Page(store: Store, session: Session, index: ProvenanceIndex) -> ft.Con
     ft.use_state(store)
     page = ft.context.page
     record = store.record()
+    scroller: PageScroller = ft.use_memo(lambda: ft.Ref[ft.Column](), [])
+    # a finished Run puts its histogram at the top of the page, above the circuit card the Run was pressed in: the page
+    # goes there. A run of the same job on the same seed lands on the same record key, so the run ending counts too
+    shown_key = record.key() if record is not None else None
+    running = any(job.request == store.engine.request for job in store.running())
+    seen: MutableRef[tuple[str | None, bool]] = ft.use_ref((shown_key, running))
+
+    def show_results() -> None:
+        before = seen.current
+        assert before is not None, "the ref starts with a value and is only ever given one"
+        key_before, running_before = before
+        seen.current = (shown_key, running)
+        if shown_key is not None and (key_before != shown_key or (running_before and not running)):
+            scroll_page(page, scroller)
+
+    ft.use_effect(show_results, dependencies=[shown_key, running])
     # the job and its engine already stand in the crumbs and the numerics badge; only a label (a preset, a request) is news
     note = record.job.label if record is not None and record.job.label else ""
     header = level_header(
@@ -580,7 +617,7 @@ def Level0Page(store: Store, session: Session, index: ProvenanceIndex) -> ft.Con
     centre: list[ft.Control]
     if record is not None:
         centre = [
-            ResultsPanel(store, session, record, index),
+            ResultsPanel(store, session, record, index, scroller),
             ProgressRows(store, session),
             CircuitEditor(store, session, index),
         ]
@@ -596,4 +633,4 @@ def Level0Page(store: Store, session: Session, index: ProvenanceIndex) -> ft.Con
                 empty_state("No result yet", "The histogram of your run will appear here.", key="empty")
             )
     layout = columns(store, page, 0, centre, right, split=(2, 1))
-    return ft.Column([header, layout], spacing=16, expand=True, scroll=ft.ScrollMode.AUTO)
+    return page_scroll([header, layout], scroller=scroller)

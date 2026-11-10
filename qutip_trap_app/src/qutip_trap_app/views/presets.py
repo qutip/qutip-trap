@@ -20,6 +20,7 @@ from qutip_trap_app.views.common import (
     data_table,
     details,
     level_header,
+    page_scroll,
     status_line,
 )
 from qutip_trap_app.views.state import Session, Store
@@ -229,7 +230,7 @@ def PresetPage(store: Store, session: Session, index: ProvenanceIndex, preset_id
         detail_controls.extend(ft.Text(w, size=theme.SIZE_SMALL) for w in why_nots)
         detail_controls.append(status_line(f"computed in {result.wall_time_s:.1f} s"))
         body.append(details(store, session, 0, f"preset.{preset_id}", detail_controls))
-    return ft.Column(
+    return page_scroll(
         [
             header,
             card(
@@ -250,7 +251,4 @@ def PresetPage(store: Store, session: Session, index: ProvenanceIndex, preset_id
                 key="preset-result",
             ),
         ],
-        spacing=16,
-        expand=True,
-        scroll=ft.ScrollMode.AUTO,
     )

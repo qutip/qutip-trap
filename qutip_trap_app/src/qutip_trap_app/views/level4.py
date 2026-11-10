@@ -21,7 +21,7 @@ from qutip_trap_app.provenance import ProvenanceIndex
 from qutip_trap_app.record import Record, StepRecord, TableRecord
 from qutip_trap_app.resim import hamiltonian_key
 from qutip_trap_app.viewmodel.builder import listed
-from qutip_trap_app.viewmodel.catalogue import Row, Shown, fmt_number, mode_family_text
+from qutip_trap_app.viewmodel.catalogue import Row, Shown, fmt_number, mode_family_text, unit_text
 from qutip_trap_app.viewmodel.physics import (
     KnobRow,
     cooling_view,
@@ -54,6 +54,7 @@ from qutip_trap_app.views.common import (
     ions_text,
     kv_rows,
     level_header,
+    page_scroll,
     page_tabs,
     pill,
     section_title,
@@ -67,12 +68,44 @@ from qutip_trap_app.views.common import (
     value_cell,
 )
 from qutip_trap_app.views.state import Session, Store
-from qutip_trap_app.views.theme import CODE_FONT, CODE_FONT_FALLBACK
 
-FORMULA = (
+FORMULA_TEXT = (
     "H/hbar = sum_m omega_m a_m^dag a_m + sum_i (Delta_i/2) sigma_z^i + sum drives (Omega/2) e^{-i(mu t - phi)} sigma_+ "
     "prod_m D_m(i eta) + h.c. + Stark"
 )
+"""The Hamiltonian the page lists the terms of, as plain text (what a pointer over the set formula shows, to copy)."""
+
+FORMULA: tuple[tuple[drawing.Run | str, ...], ...] = (
+    ("H/ħ =",),
+    (
+        "Σ",
+        drawing.sub("m"),
+        " ω",
+        drawing.sub("m"),
+        " a",
+        drawing.sup("†"),
+        drawing.sub("m"),
+        " a",
+        drawing.sub("m"),
+    ),
+    ("+ Σ", drawing.sub("i"), " (Δ", drawing.sub("i"), "/2) σ", drawing.sub("z"), drawing.sup("(i)")),
+    (
+        "+ Σ",
+        drawing.sub("drives"),
+        " (Ω/2) e",
+        drawing.sup("−i(μt − φ)"),
+        " σ",
+        drawing.sub("+"),
+        " Π",
+        drawing.sub("m"),
+        " D",
+        drawing.sub("m"),
+        "(iη)",
+    ),
+    ("+ h.c.",),
+    ("+ Stark",),
+)
+"""The same Hamiltonian set as mathematics, term by term (a narrow card breaks the line between terms)."""
 
 
 def _tiles(rows: tuple[Row, ...], index: ProvenanceIndex, *, plain: bool) -> ft.Control:
@@ -530,7 +563,7 @@ def CrystalPage(store: Store, session: Session, layer: DeviceLayer, index: Prove
     ]
     eta_cols = ["ion"] + [f"mode {k}" for k in range(len(v.eta_rows[0][1]))] if v.eta_rows else ["ion"]
     selector = ft.Dropdown(
-        label="mode to draw",
+        label="Mode to draw",
         value=str(m.index if m is not None else 0),
         options=[
             ft.DropdownOption(
@@ -673,9 +706,7 @@ def _light_page(ctx: Page) -> list[ft.Control]:
             stat_tile(d.rabi, index, plain=plain, label=f"ion {d.ion}, {d.role}: Rabi frequency")
         )
         drive_tiles.append(
-            stat_tile(
-                d.error_per_pi, index, plain=plain, label=f"ion {d.ion}, {d.role}: scatter per pi pulse"
-            )
+            stat_tile(d.error_per_pi, index, plain=plain, label=f"ion {d.ion}, {d.role}: scatter per π pulse")
         )
     curve: ft.Control = status_line("no Raman pair to sweep")
     if v.curve_wavelength_m is not None and v.curve_error is not None and v.curve_rabi_hz is not None:
@@ -691,16 +722,16 @@ def _light_page(ctx: Page) -> list[ft.Control]:
         curve = ft.Column(
             [
                 drawing.line_chart(
-                    [("scattering error per pi pulse", v.curve_wavelength_m * 1e9, v.curve_error)],
+                    [("scattering error per π pulse", v.curve_wavelength_m * 1e9, v.curve_error)],
                     x_title="wavelength (nm)",
-                    y_title="P per pi pulse",
+                    y_title="error per π pulse",
                     log_y=True,
                     markers=markers,
                 ),
                 drawing.line_chart(
                     [("two-photon Rabi frequency", v.curve_wavelength_m * 1e9, v.curve_rabi_hz)],
                     x_title="wavelength (nm)",
-                    y_title="Omega/2pi (Hz)",
+                    y_title="Ω/2π (Hz)",
                     log_y=True,
                     height=150,
                 ),
@@ -739,7 +770,7 @@ def _light_page(ctx: Page) -> list[ft.Control]:
                                 "role",
                                 "beams",
                                 "Rabi frequency",
-                                "pi time",
+                                "π time",
                                 "light shift",
                                 "residual excited",
                                 "scatter per pi",
@@ -784,7 +815,7 @@ def _noise_page(ctx: Page) -> list[ft.Control]:
             ft.Column(
                 [
                     ft.Row(
-                        [section_title(f"{sp.name} ({sp.unit})"), shown(sp.level, index)],
+                        [section_title(f"{sp.name} ({unit_text(sp.unit)})"), shown(sp.level, index)],
                         wrap=True,
                         spacing=theme.GAP,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -792,7 +823,7 @@ def _noise_page(ctx: Page) -> list[ft.Control]:
                     drawing.line_chart(
                         [(sp.name, sp.omega_rad_s / (2 * np.pi), sp.S)],
                         x_title="f (Hz)",
-                        y_title=sp.unit,
+                        y_title=unit_text(sp.unit),
                         log_x=True,
                         log_y=True,
                         height=150,
@@ -806,7 +837,8 @@ def _noise_page(ctx: Page) -> list[ft.Control]:
         spectra.append(status_line("zero everywhere: " + ", ".join(zero_names)))
     drift_rows: list[list[ft.Control | str]] = [
         [
-            name,
+            # the noise model's field name in words
+            name.replace("_", " "),
             value_cell(rms, index),
             value_cell(tau, index),
             value_cell(servo, index) if servo is not None else "none",
@@ -814,7 +846,8 @@ def _noise_page(ctx: Page) -> list[ft.Control]:
         for name, rms, tau, servo in v.drifts
     ]
     rate_tiles: list[ft.Control] = [
-        stat_tile(h, index, plain=plain)
+        # each rate's detail names its mode or ion, which is what tells six tiles of one quantity apart
+        stat_tile(h, index, plain=plain, of=h.detail)
         for h in (list(v.heating) + list(v.motional_dephasing) + list(v.qubit_dephasing))[:6]
     ]
     rates: list[ft.Control] = (
@@ -907,13 +940,19 @@ def _cooling_page(ctx: Page) -> list[ft.Control]:
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
                     drawing.line_chart(
-                        [(f"<n> of mode {sb.mode} after each pulse", sb.times_s * 1e6, sb.nbar_after_pulse)],
+                        [(f"⟨n⟩ of mode {sb.mode} after each pulse", sb.times_s * 1e6, sb.nbar_after_pulse)],
                         x_title="t (µs)",
-                        y_title="<n>",
+                        y_title="⟨n⟩",
                         log_y=True,
                         height=160,
                     ),
-                    tile_row((sb.nbar_start, sb.nbar_end, sb.nbar_final_run), index, plain=plain),
+                    # three occupations of one mode: each tile says when (its value's detail)
+                    stat_row(
+                        [
+                            stat_tile(s, index, plain=plain, label=f"⟨n⟩ {s.detail}")
+                            for s in (sb.nbar_start, sb.nbar_end, sb.nbar_final_run)
+                        ]
+                    ),
                     status_line(
                         f"{len(sb.orders)} pulses on sideband orders "
                         f"{listed([str(k) for k in sorted(set(sb.orders), reverse=True)])}, higher first; "
@@ -951,7 +990,7 @@ def _cooling_page(ctx: Page) -> list[ft.Control]:
                             else []
                         )
                     ),
-                    shown_row(p.heating, index, label=False, spacing=8),
+                    shown_group(p.heating, index, plain=plain) if p.heating else ft.Container(),
                 ],
                 spacing=6,
             )
@@ -1005,7 +1044,7 @@ def _cooling_page(ctx: Page) -> list[ft.Control]:
             pump_children
             + [
                 stat_row(
-                    [stat_tile(s, index, plain=plain) for s in v.final_nbar[:4]]
+                    [stat_tile(s, index, plain=plain, of=s.detail) for s in v.final_nbar[:4]]
                     + [stat_tile(v.duration, index, plain=plain)]
                 ),
                 status_line("provenance: " + ", ".join(v.provenance)),
@@ -1042,7 +1081,7 @@ def _readout_page(ctx: Page) -> list[ft.Control]:
                     ("R_b dark pumped bright", i.saturation_s, i.saturation_r_b),
                 ],
                 x_title="s = I/I_sat",
-                y_title="rate (1/s)",
+                y_title="rate (s⁻¹)",
                 log_x=True,
                 log_y=True,
                 markers=markers,
@@ -1205,7 +1244,16 @@ def _hamiltonian_page(ctx: Page) -> list[ft.Control]:
         out.append(
             card(
                 "No pulse yet",
-                status_line("run a job, then zoom into a pulse on Level 3"),
+                status_line("The equation of a pulse appears here once a job has run."),
+                # never a dead end: the way to a pulse starts on the machine
+                actions=[
+                    ft.FilledTonalButton(
+                        content=ft.Text("Run a job on the machine"),
+                        icon=ft.Icons.BAR_CHART,
+                        on_click=lambda e: page.navigate("/"),
+                        key="no-pulse-home",
+                    )
+                ],
                 key="no-pulse",
             )
         )
@@ -1369,7 +1417,7 @@ def _hamiltonian_page(ctx: Page) -> list[ft.Control]:
                                         plain=plain,
                                     ),
                                     data_table(
-                                        ["tone", "detuning mu", "phase at start", "peak Omega/2pi"], tone_rows
+                                        ["tone", "detuning μ", "phase at start", "peak Ω/2π"], tone_rows
                                     )
                                     if tone_rows
                                     else ft.Container(),
@@ -1439,16 +1487,11 @@ def _hamiltonian_page(ctx: Page) -> list[ft.Control]:
                 ft.Column(
                     [
                         ft.Container(
-                            content=ft.Text(
-                                FORMULA,
-                                size=theme.SIZE_SMALL + 1,
-                                selectable=True,
-                                font_family=CODE_FONT,
-                                font_family_fallback=CODE_FONT_FALLBACK,
-                            ),
-                            padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+                            content=drawing.formula(FORMULA),
+                            padding=ft.Padding.symmetric(horizontal=16, vertical=12),
                             bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
                             border_radius=ft.BorderRadius.all(theme.RADIUS_TILE),
+                            tooltip=FORMULA_TEXT,
                         ),
                         _tiles(v.header, index, plain=plain),
                         hint(store, 4, "hamiltonian"),
@@ -1458,7 +1501,7 @@ def _hamiltonian_page(ctx: Page) -> list[ft.Control]:
                             4,
                             "level4.hamiltonian.free",
                             [
-                                data_table(["mode", "class", "omega_m/2pi", "sample offset"], free_rows),
+                                data_table(["mode", "class", "ω/2π", "sample offset"], free_rows),
                                 shown_row(v.qubit_offsets + v.stark, index),
                                 *([shown_group(v.caps, index)] if v.caps else []),
                                 data_table(
@@ -1635,7 +1678,7 @@ DEVICE_PAGES: dict[str, DevicePage] = {
                         ("light_coupling", "pulse", "crosstalk"), _light_page),
     "noise": DevicePage("The noise", "Where do the error rates come from?", "6.1",
                         ("noise_as_physics", "quantum_jumps"), _noise_page),
-    "cooling": DevicePage("Cooling and preparation", "How does every shot start cold and in |0>?", "4.2",
+    "cooling": DevicePage("Cooling and preparation", "How does every shot start cold and in |0⟩?", "4.2",
                           ("cooling_ladder", "fock_states", "debye_waller"), _cooling_page),
     "readout": DevicePage("The readout", "How does a photon count become a bit?", "8.1",
                           ("readout_rates", "spam"), _readout_page),
@@ -1689,7 +1732,7 @@ def Level4Page(store: Store, session: Session, page_name: str, index: Provenance
                     key="deriving",
                 )
             )
-            return ft.Column(body, spacing=16, expand=True, scroll=ft.ScrollMode.AUTO)
+            return page_scroll(body)
         # the device model refused these knob values (a trap without an rf record, an unstable chain, a mode the cooling
         # beams do not reach, a failed Lamb-Dicke check): the reason is shown where the knobs are, and the knobs stay in
         # reach on the last device that did derive, so the value can be moved back or every knob reset
@@ -1722,7 +1765,7 @@ def Level4Page(store: Store, session: Session, page_name: str, index: Provenance
         previous = list(store.layers.values())
         if previous:
             body.append(KnobPanel(store, session, previous[-1], page_name, index))
-        return ft.Column(body, spacing=16, expand=True, scroll=ft.ScrollMode.AUTO)
+        return page_scroll(body)
     body.append(DeviceStatusStrip(store, session, layer))
     body += device_page.render(
         Page(store, session, layer, _table(store, layer), index, store.learner.plan(4).plain_labels_first)
@@ -1733,4 +1776,4 @@ def Level4Page(store: Store, session: Session, page_name: str, index: Provenance
             f"derived in {layer.wall_time_s:.1f} s" + (f"; {'; '.join(layer.notes)}" if layer.notes else "")
         )
     )
-    return ft.Column(body, spacing=16, expand=True, scroll=ft.ScrollMode.AUTO)
+    return page_scroll(body)

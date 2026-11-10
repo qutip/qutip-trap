@@ -18,14 +18,17 @@ from qutip_trap_app.viewmodel.presets import PRESETS
 from qutip_trap_app.views import routes, theme
 from qutip_trap_app.views.common import (
     MUTED,
+    SCROLL_GUTTER,
     ExplainDrawer,
     compact,
     content_margin,
     drawer_docked,
+    drawer_open,
     empty_state,
     event_bool,
     numerics_strip,
     page_padding,
+    page_scroll,
     status_line,
 )
 from qutip_trap_app.views.learn import ACTIVITIES, KNOWLEDGE, LearnPage
@@ -299,17 +302,20 @@ def ZoomBar(store: Store, session: Session, path: str, keys: ZoomKeys, *, narrow
     for k, (text, route) in enumerate(crumbs_of(store, path)):
         if k:
             crumbs.append(ft.Icon(ft.Icons.CHEVRON_RIGHT, size=14, color=MUTED))
+        # the place the learner is on is in ink and is not a link: a crumb that opens the page it stands on reads as
+        # somewhere else to go
+        here = route is None or route == path
         crumbs.append(
             ft.TextButton(
                 content=ft.Text(
                     text,
                     size=theme.SIZE_SMALL + 1,
-                    weight=ft.FontWeight.W_600 if k == 0 and route is None else ft.FontWeight.W_400,
-                    color=ft.Colors.ON_SURFACE if route is None else None,
+                    weight=ft.FontWeight.W_600 if k == 0 else ft.FontWeight.W_400,
+                    color=ft.Colors.ON_SURFACE if here else None,
                     no_wrap=True,
                 ),
-                on_click=(lambda e, r=route: page.navigate(r)) if route else None,
-                disabled=route is None,
+                on_click=None if here else (lambda e, r=route: page.navigate(r)),
+                disabled=here,
                 style=ft.ButtonStyle(
                     padding=ft.Padding.symmetric(horizontal=6, vertical=4),
                     color={ft.ControlState.DISABLED: ft.Colors.ON_SURFACE},
@@ -348,10 +354,8 @@ def ZoomBar(store: Store, session: Session, path: str, keys: ZoomKeys, *, narrow
                     selected_icon=ft.Icons.MENU_BOOK,
                     icon_size=20,
                     tooltip="explain: this level's concepts, one at a time, at your depth",
-                    selected=store.learner.explain_is_open(level),
-                    on_click=lambda e: session.set_learner(
-                        explain_open=not store.learner.explain_is_open(level)
-                    ),
+                    selected=drawer_open(store, page, level),
+                    on_click=lambda e: session.set_learner(explain_open=not drawer_open(store, page, level)),
                     style=ft.ButtonStyle(bgcolor={ft.ControlState.SELECTED: ft.Colors.SECONDARY_CONTAINER}),
                     key="explain-toggle",
                 ),
@@ -444,17 +448,21 @@ def RoutedContent(store: Store, session: Session, index: ProvenanceIndex, path: 
     record = store.records.get(r.job)
     if record is None:
         page = ft.context.page
-        return empty_state(
-            "This job is not in the session",
-            f"job {r.job[:8]} is held by the session that ran it, and a reload or a new tab starts a fresh one",
-            icon=ft.Icons.SEARCH_OFF,
-            action=ft.FilledButton(
-                content=ft.Text("Run a job on the machine"),
-                icon=ft.Icons.BAR_CHART,
-                on_click=lambda e: page.navigate("/"),
-                key="unknown-job-home",
-            ),
-            key="unknown-job",
+        return page_scroll(
+            [
+                empty_state(
+                    "This job is not in the session",
+                    f"Job {r.job[:8]} is held by the session that ran it; a reload or a new tab starts a fresh one.",
+                    icon=ft.Icons.SEARCH_OFF,
+                    action=ft.FilledButton(
+                        content=ft.Text("Run a job on the machine"),
+                        icon=ft.Icons.BAR_CHART,
+                        on_click=lambda e: page.navigate("/"),
+                        key="unknown-job-home",
+                    ),
+                    key="unknown-job",
+                )
+            ]
         )
     if r.gate is not None:
         return Level1Page(store, session, record, r.gate, index)
@@ -563,7 +571,7 @@ def Shell(store: Store, session: Session, index: ProvenanceIndex) -> ft.Control:
         if e.key == "Escape":
             # Escape closes the drawer and nothing else: it also closes a menu and leaves a text field, where zooming out
             # would navigate away from what was being typed
-            if route.level >= 0 and store.learner.explain_is_open(level):
+            if route.level >= 0 and drawer_open(store, page, level):
                 session.set_learner(explain_open=False)
         elif keys.zooms_out(e) and up:
             page.navigate(up)
@@ -649,10 +657,11 @@ def Shell(store: Store, session: Session, index: ProvenanceIndex) -> ft.Control:
             if store.numerics_open is None
             else store.numerics_open,
             on_change=toggle_numerics,
+            window_height=page.height or 800.0,
         )
     # on the five levels the drawer follows the learner's plan; on Learn it opens only when asked (a chip, a why button)
     explain_open = (
-        store.learner.explain_is_open(level)
+        drawer_open(store, page, level)
         if route.level >= 0
         else bool(store.learner.explain_open) or store.spec_section is not None
     )
@@ -665,7 +674,8 @@ def Shell(store: Store, session: Session, index: ProvenanceIndex) -> ft.Control:
         ft.Container(
             content=RoutedContent(store, session, index, path),
             expand=True,
-            padding=ft.Padding.only(left=pad, right=pad, bottom=theme.GAP),
+            # the page's own column keeps the scrollbar's gutter inside its right padding
+            padding=ft.Padding.only(left=pad, right=pad - SCROLL_GUTTER, bottom=theme.GAP),
         ),
     ]
     drawer: ft.Control | None = None

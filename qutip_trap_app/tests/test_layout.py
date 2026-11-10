@@ -6,7 +6,14 @@ from __future__ import annotations
 import dataclasses
 
 from qutip_trap_app.views import theme
-from qutip_trap_app.views.common import TWO_COLUMN_MIN_WIDTH, card_room, compact, content_width, drawer_docked
+from qutip_trap_app.views.common import (
+    TWO_COLUMN_MIN_WIDTH,
+    card_room,
+    compact,
+    content_width,
+    drawer_docked,
+    drawer_open,
+)
 from qutip_trap_app.views.state import Store
 
 
@@ -46,3 +53,13 @@ def test_the_drawer_docks_under_the_content_it_would_crowd() -> None:
     assert card_room(store, tight, 0, share=0.5) == content - 2 * theme.CARD_PADDING, (
         "a stacked card has the column"
     )
+
+
+def test_a_compact_window_opens_the_drawer_only_when_asked() -> None:
+    """Docked, the drawer is a sheet over the lower half of a phone: it stays shut until the learner opens it, whatever
+    their plan opens on a wide window; their own choice holds on both."""
+    phone, laptop = _Window(390.0), _Window(1280.0)
+    unasked = Store()
+    assert unasked.learner.explain_open is None and unasked.learner.explain_is_open(0), "the plan opens it"
+    assert drawer_open(unasked, laptop, 0) and not drawer_open(unasked, phone, 0)
+    assert drawer_open(_store(drawer=True), phone, 0) and not drawer_open(_store(drawer=False), laptop, 0)

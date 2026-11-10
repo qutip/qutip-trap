@@ -657,7 +657,8 @@ def cooling_view(layer: DeviceLayer) -> CoolingView | None:
             if p.time_to_reach_s is None
             else Shown("stage_duration", p.time_to_reach_s, "time to reach the target within tolerance"),
             heating=tuple(
-                Shown("recoil_heating", v, f"mode {m}") for m, v in sorted(p.motional_heating_quanta.items())
+                Shown("recoil_heating", v, f"mode {m}", of=f"mode {m}")
+                for m, v in sorted(p.motional_heating_quanta.items())
             ),
             trace_times_s=p.trace_times_s,
             trace_populations=p.trace_populations,

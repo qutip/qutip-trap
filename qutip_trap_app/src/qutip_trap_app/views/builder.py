@@ -866,7 +866,7 @@ def CircuitBuilder(store: Store, session: Session) -> ft.Control:
         ft.Row(
             [
                 ft.TextButton(
-                    content=ft.Text("add qubit"),
+                    content=ft.Text("Add qubit"),
                     icon=ft.Icons.ADD,
                     on_click=add_qubit,
                     disabled=n >= vm.MAX_QUBITS,
@@ -874,7 +874,7 @@ def CircuitBuilder(store: Store, session: Session) -> ft.Control:
                     key="builder-add-qubit",
                 ),
                 ft.TextButton(
-                    content=ft.Text("remove qubit"),
+                    content=ft.Text("Remove qubit"),
                     icon=ft.Icons.REMOVE,
                     on_click=remove_qubit,
                     disabled=n <= vm.MIN_QUBITS,
@@ -882,7 +882,7 @@ def CircuitBuilder(store: Store, session: Session) -> ft.Control:
                     key="builder-remove-qubit",
                 ),
                 ft.TextButton(
-                    content=ft.Text("clear"),
+                    content=ft.Text("Clear"),
                     icon=ft.Icons.DELETE_SWEEP_OUTLINED,
                     on_click=clear_all,
                     disabled=not circuit.ops,

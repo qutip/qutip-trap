@@ -15,12 +15,14 @@ import struct
 import zlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import flet as ft
 import flet.canvas as cv
 import flet_charts as fc
 import numpy as np
 
+from qutip_trap_app.viewmodel.catalogue import fmt_number, power_of_ten
 from qutip_trap_app.views import theme
 
 # ---- PNG heatmaps ---------------------------------------------------------------------------------------------------------------------
@@ -87,6 +89,12 @@ def heatmap_png(values: np.ndarray, *, cell_w: int, cell_h: int) -> bytes:
     return png_bytes(img)
 
 
+HEATMAP_MAX_WIDTH = 520.0
+"""The widest a heatmap grows to fill its card: beyond it the cells of a small matrix would be slabs."""
+_HEATMAP_Y_LABELS = 30.0
+"""The width of a heatmap's row labels, and of the gap that keeps its column labels under their columns."""
+
+
 def heatmap(
     values: np.ndarray,
     *,
@@ -96,68 +104,149 @@ def heatmap(
     y_title: str,
     cell_w: int = 14,
     cell_h: int = 10,
+    room: float | None = None,
     tooltip: str = "",
 ) -> ft.Control:
     """A labelled heatmap: the PNG with its row labels on the left and column labels beneath (a table alternative is the
-    caller's, DESIGN.md Section 4)."""
+    caller's, DESIGN.md Section 4). ``cell_w`` and ``cell_h`` are the smallest a cell is drawn; given the ``room`` of its
+    card, a map of few columns grows its cells to fill it (up to ``HEATMAP_MAX_WIDTH``), so that a pulse of nine stored
+    times is a picture rather than a postage stamp."""
     rows, cols = values.shape
+    if room is not None:
+        fill = (min(room, HEATMAP_MAX_WIDTH) - _HEATMAP_Y_LABELS - 4.0) / max(cols, 1)
+        grown = int(min(max(fill, cell_w), 4.0 * cell_w))
+        cell_w, cell_h = grown, int(min(max(cell_h, 0.45 * grown), 2.2 * cell_h))
     img = ft.Image(
         src=heatmap_png(values, cell_w=cell_w, cell_h=cell_h),
         width=cols * cell_w,
         height=rows * cell_h,
         fit=ft.BoxFit.FILL,
+        border_radius=ft.BorderRadius.all(4),
         tooltip=tooltip or None,
     )
     ylab = ft.Column(
         [
-            ft.Text(str(y_labels[r]), size=9, height=cell_h, color=ft.Colors.ON_SURFACE_VARIANT)
+            ft.Text(
+                str(y_labels[r]),
+                size=theme.SIZE_MICRO,
+                height=cell_h,
+                width=_HEATMAP_Y_LABELS,
+                text_align=ft.TextAlign.RIGHT,
+                color=ft.Colors.ON_SURFACE_VARIANT,
+            )
+            # a label per row while the rows are tall enough to hold one, else every second
+            if cell_h >= 12 or r % 2 == 0
+            else ft.Container(height=cell_h, width=_HEATMAP_Y_LABELS)
             for r in reversed(range(rows))
         ],
         spacing=0,
         tight=True,
     )
-    step = max(1, cols // 8)
+    # a column label needs about 6 px a character and a gap: label every column that many cells apart
+    widest = max((len(str(x_labels[c])) for c in range(cols)), default=1)
+    step = max(1, math.ceil((6.0 * widest + 8.0) / cell_w))
     xlab = ft.Row(
         [
             ft.Text(
-                str(x_labels[c]) if c % step == 0 else "",
-                size=9,
-                width=cell_w,
+                str(x_labels[c]),
+                size=theme.SIZE_MICRO,
+                width=cell_w * min(step, cols - c),
                 no_wrap=True,
+                text_align=ft.TextAlign.CENTER if step == 1 else ft.TextAlign.LEFT,
                 color=ft.Colors.ON_SURFACE_VARIANT,
             )
-            for c in range(cols)
+            for c in range(0, cols, step)
         ],
         spacing=0,
         tight=True,
     )
-    legend = ft.Row(
+    scale = ft.Row(
         [
+            ft.Text(power_of_ten(-6), size=theme.SIZE_MICRO, color=ft.Colors.ON_SURFACE_VARIANT),
             ft.Image(
-                src=heatmap_png(np.logspace(-6, 0, 12)[None, :], cell_w=12, cell_h=8),
-                width=144,
+                src=heatmap_png(np.logspace(-6, 0, 12)[None, :], cell_w=10, cell_h=8),
+                width=120,
                 height=8,
                 fit=ft.BoxFit.FILL,
+                border_radius=ft.BorderRadius.all(2),
             ),
-            ft.Text("1e-6 to 1 (log)", size=9, color=ft.Colors.ON_SURFACE_VARIANT),
+            ft.Text("1 (log scale)", size=theme.SIZE_MICRO, color=ft.Colors.ON_SURFACE_VARIANT),
         ],
         spacing=6,
-    )
-    return ft.Column(
-        [
-            ft.Text(y_title, size=10, color=ft.Colors.ON_SURFACE_VARIANT),
-            ft.Row([ylab, img], spacing=4, vertical_alignment=ft.CrossAxisAlignment.START),
-            ft.Row([ft.Container(width=34), xlab], spacing=4),
-            ft.Row(
-                [
-                    ft.Text(x_title, size=10, color=ft.Colors.ON_SURFACE_VARIANT),
-                    ft.Container(expand=True),
-                    legend,
-                ]
-            ),
-        ],
-        spacing=2,
         tight=True,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+    lines: list[ft.Control] = []
+    if y_title:
+        lines.append(_axis_title(y_title))
+    lines += [
+        ft.Row([ylab, img], spacing=4, tight=True, vertical_alignment=ft.CrossAxisAlignment.START),
+        ft.Row([ft.Container(width=_HEATMAP_Y_LABELS), xlab], spacing=4, tight=True),
+        ft.Row(
+            [ft.Container(width=_HEATMAP_Y_LABELS), _axis_title(x_title), ft.Container(width=12), scale],
+            spacing=4,
+            wrap=True,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
+    ]
+    return ft.Column(lines, spacing=4, tight=True)
+
+
+# ---- formulas ---------------------------------------------------------------------------------------------------------------------------
+
+
+class Run(NamedTuple):
+    """A run of a formula's characters and where it stands: on the line (0), raised as a superscript (+1) or lowered as
+    a subscript (-1)."""
+
+    text: str
+    level: int = 0
+
+
+def sup(text: str) -> Run:
+    return Run(text, 1)
+
+
+def sub(text: str) -> Run:
+    return Run(text, -1)
+
+
+FORMULA_SIZE = 17
+_SCRIPT_SIZE = 12
+_SCRIPT_SHIFT = 9.0
+"""How far a superscript's or subscript's box is pushed off the line's centre (it is centred in the row otherwise)."""
+
+
+def formula(terms: Sequence[Sequence[Run | str]]) -> ft.Control:
+    """A formula set as mathematics: Greek letters as letters, superscripts raised and subscripts lowered at the script
+    size, which the text engine has no markup for. ``terms`` are the pieces a narrow card may break the line between; a
+    term itself never breaks."""
+
+    def piece(run: Run | str) -> ft.Control:
+        text, level = (run, 0) if isinstance(run, str) else run
+        if level == 0:
+            return ft.Text(text, size=FORMULA_SIZE, no_wrap=True)
+        return ft.Container(
+            content=ft.Text(text, size=_SCRIPT_SIZE, no_wrap=True),
+            padding=ft.Padding.only(bottom=_SCRIPT_SHIFT)
+            if level > 0
+            else ft.Padding.only(top=_SCRIPT_SHIFT),
+        )
+
+    return ft.Row(
+        [
+            ft.Row(
+                [piece(run) for run in term],
+                spacing=0,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+            for term in terms
+        ],
+        wrap=True,
+        spacing=6,
+        run_spacing=2,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
     )
 
 
@@ -184,7 +273,17 @@ def _label(
 
 
 def _axis_title(text: str) -> ft.Text:
-    return ft.Text(text, size=10, color=ft.Colors.ON_SURFACE_VARIANT)
+    return ft.Text(text, size=theme.SIZE_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT)
+
+
+def _captioned(canvas: ft.Control, caption: str, width: float) -> ft.Control:
+    """A drawing with its caption beneath it as text, which wraps at the drawing's width: drawn on the canvas, a caption
+    longer than a narrow card is cut at the canvas's edge."""
+    return ft.Column(
+        [canvas, ft.Text(caption, size=theme.SIZE_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT, width=width)],
+        spacing=4,
+        tight=True,
+    )
 
 
 def _grid() -> fc.ChartGridLines:
@@ -250,11 +349,11 @@ class Axes:
                     paint=_stroke(ft.Colors.OUTLINE, 1.0),
                 )
             )
-            out.append(_label(px - 12, self.top + self.plot_h + 6, text, size=9))
+            out.append(_label(px - 12, self.top + self.plot_h + 6, text))
         for v, text in y_ticks:
             py = self.y(v)
             out.append(cv.Line(self.left - 4, py, self.left, py, paint=_stroke(ft.Colors.OUTLINE, 1.0)))
-            out.append(_label(2, py - 6, text, size=9))
+            out.append(_label(2, py - 6, text))
         if x_title:
             out.append(_label(self.left + self.plot_w / 2 - 30, self.height - 12, x_title))
         if y_title:
@@ -308,6 +407,70 @@ def _ticks(lo: float, hi: float, n: int, fmt: str) -> list[tuple[float, str]]:
 # ---- Level 4 drawings --------------------------------------------------------------------------------------------------------------------
 
 
+CANVAS_TEXT = 10
+"""The smallest text a drawing sets: its labels are the drawing's only words, so they keep the app's micro size."""
+_GLYPH_WIDTH = 0.56
+"""A character's mean advance over its font size in the app's sans: the width a drawing reserves for a label."""
+
+
+def _text_width(text: str, size: int = CANVAS_TEXT) -> float:
+    return _GLYPH_WIDTH * size * len(text)
+
+
+class _Box(NamedTuple):
+    """A label's rectangle on a canvas."""
+
+    left: float
+    top: float
+    right: float
+    bottom: float
+
+    def overlaps(self, other: _Box) -> bool:
+        return (
+            self.left < other.right
+            and other.left < self.right
+            and self.top < other.bottom
+            and other.top < self.bottom
+        )
+
+
+def _backed_label(
+    x: float, y: float, text: str, *, color: str, size: int = CANVAS_TEXT
+) -> tuple[_Box, list[cv.Shape]]:
+    """A label on a patch of the card's surface, so that a line passing under it does not strike it through."""
+    box = _Box(x - 3.0, y - 1.0, x + _text_width(text, size) + 3.0, y + size + 4.0)
+    patch = cv.Rect(
+        box.left,
+        box.top,
+        box.right - box.left,
+        box.bottom - box.top,
+        border_radius=ft.BorderRadius.all(3),
+        paint=_fill(ft.Colors.SURFACE_CONTAINER_LOWEST),
+    )
+    return box, [patch, _label(x, y, text, size=size, color=color)]
+
+
+def lifetime_text(seconds: float) -> str:
+    """A level's lifetime in the unit a reader would say it in: 8.07 ns, 52.7 ms, 3.2 yr."""
+    if seconds >= 3.156e7:
+        return f"{seconds / 3.156e7:.3g} yr"
+    if seconds >= 86400.0:
+        return f"{seconds / 86400.0:.3g} d"
+    return fmt_number(seconds, "s")
+
+
+_TERM_COLUMNS = "SPDFG"
+"""A Grotrian diagram's columns: one per orbital letter, in order."""
+
+
+def _term_column(name: str) -> int:
+    """The column of a level: its orbital letter's (S1/2 in the first, P1/2 and P3/2 in the second); a level in another
+    coupling scheme (3D[3/2]1/2) takes a column of its own after them."""
+    if "[" in name:
+        return len(_TERM_COLUMNS)
+    return next((_TERM_COLUMNS.index(ch) for ch in name if ch in _TERM_COLUMNS), len(_TERM_COLUMNS))
+
+
 def level_diagram(
     levels: Sequence[tuple[str, float, float | None]],
     transitions: Sequence[tuple[str, str, str, float]],
@@ -315,86 +478,108 @@ def level_diagram(
     *,
     room: float,
 ) -> ft.Control:
-    """Fine-structure levels as horizontal bars at a compressed energy scale (sqrt of the energy above the ground level, so
-    the ground and the optical levels fit one picture; labelled not to scale), the tabulated transitions as arrows with their
-    wavelengths, the qubit level marked. At most 420 px wide, narrower when ``room`` (the card's width) is."""
-    width, height = min(420.0, room), 300.0
+    """Fine-structure levels as a Grotrian diagram: one column per orbital letter, the ground level at the foot, the
+    excited levels above a break in the energy axis and spaced by their energies among themselves (labelled not to scale:
+    the optical gap would otherwise press them into one line), the tabulated transitions as arrows with their
+    wavelengths, the qubit level marked. At most 560 px wide, narrower when ``room`` (the card's width) is."""
+    width, height = min(560.0, room), 320.0
     names = [n for n, _e, _t in levels]
     energies = np.asarray([e for _n, e, _t in levels], dtype=float)
-    scaled = np.sqrt(np.clip(energies, 0.0, None))
+    ax = Axes(width, height, (0.0, 1.0), (0.0, 1.06), margin=(26.0, 22.0, 10.0, 10.0))
+    excited = energies > 0.0
+    lo, hi = (
+        (float(np.min(energies[excited])), float(np.max(energies[excited]))) if excited.any() else (0.0, 1.0)
+    )
+    # the ground level at 0, the excited levels from 0.32 to 1 by energy: the break between is the labelled exception
+    scaled = np.where(excited, 0.32 + 0.68 * (energies - lo) / (hi - lo if hi > lo else 1.0), 0.0)
+    # a fine-structure doublet is a few THz apart in hundreds: each level sits at least a label's height above the one
+    # below it (the order kept), and the excited levels are fitted back under the top
+    gap = 26.0 / ax.plot_h * 1.06
+    order = np.argsort(scaled, kind="stable")
+    for below, above in zip(order, order[1:]):
+        scaled[above] = max(scaled[above], scaled[below] + gap)
     top = float(np.max(scaled)) if scaled.size else 1.0
-    ax = Axes(width, height, (0.0, 1.0), (0.0, top * 1.08), margin=(8.0, 14.0, 18.0, 8.0))
+    if top > 1.0:
+        scaled = np.where(excited, 0.32 + (scaled - 0.32) * 0.68 / (top - 0.32), scaled)
+    used = sorted({_term_column(n) for n in names})
+    slot = 1.0 / max(len(used), 1)
+    bar = 0.62 * slot
+    left_of = {n: used.index(_term_column(n)) * slot + 0.5 * (slot - bar) for n in names}
+    centre_of = {n: left_of[n] + 0.5 * bar for n in names}
     shapes: list[cv.Shape] = []
-    # levels sorted by energy take alternating columns so labels do not collide
-    order = sorted(range(len(names)), key=lambda i: energies[i])
-    col_of: dict[str, float] = {}
-    for rank, i in enumerate(order):
-        col_of[names[i]] = (
-            0.12 + 0.76 * ((rank * 5) % 7) / 6.0
-            if len(names) > 3
-            else 0.2 + 0.6 * rank / max(len(names) - 1, 1)
-        )
+    # the energy axis with its break between the ground level and the excited ones
+    x_axis = ax.left - 14.0
+    y_break = ax.y(0.16)
+    shapes += [
+        cv.Line(x_axis, ax.y(0.0), x_axis, y_break + 5.0, paint=_stroke(ft.Colors.OUTLINE_VARIANT, 1.0)),
+        cv.Line(x_axis, y_break - 5.0, x_axis, ax.y(1.03), paint=_stroke(ft.Colors.OUTLINE_VARIANT, 1.0)),
+    ]
+    shapes += [
+        cv.Line(x_axis - 5.0, y + 2.5, x_axis + 5.0, y - 2.5, paint=_stroke(ft.Colors.OUTLINE, 1.0))
+        for y in (y_break - 5.0, y_break + 5.0)
+    ]
+    boxes: list[_Box] = []
+    # drawn in this order: the bars, the arrows over them, then every label on its patch over both
+    level_labels: list[cv.Shape] = []
     for i, name in enumerate(names):
-        x0 = col_of[name] - 0.09
-        y = float(scaled[i])
-        color = ft.Colors.PRIMARY if name == qubit_level else ft.Colors.ON_SURFACE
+        x0, y = ax.x(left_of[name]), ax.y(float(scaled[i]))
+        is_qubit = name == qubit_level
+        color = ft.Colors.PRIMARY if is_qubit else ft.Colors.ON_SURFACE
         shapes.append(
-            cv.Line(
-                ax.x(x0),
-                ax.y(y),
-                ax.x(x0 + 0.18),
-                ax.y(y),
-                paint=_stroke(color, 3.0 if name == qubit_level else 2.0),
-            )
+            cv.Line(x0, y, ax.x(left_of[name] + bar), y, paint=_stroke(color, 3.0 if is_qubit else 2.0))
         )
         life = levels[i][2]
-        text = (
-            name
-            if life is None
-            else f"{name}  ({life:.3g} s)"
-            if life > 1e-3
-            else f"{name}  ({life * 1e9:.2f} ns)"
-        )
-        shapes.append(_label(ax.x(x0), ax.y(y) - 13, text, size=9, color=color))
-    for k, (_label_text, lower, upper, lam) in enumerate(transitions):
-        if lower not in col_of or upper not in col_of:
+        text = name + (" · qubit" if is_qubit else "") + ("" if life is None else f" · {lifetime_text(life)}")
+        box, drawn = _backed_label(x0, y - CANVAS_TEXT - 7.0, text, color=color)
+        boxes.append(box)
+        level_labels += drawn
+    labels: list[cv.Shape] = []
+    for _name, lower, upper, lam in transitions:
+        if lower not in left_of or upper not in left_of:
             continue
         i_lo, i_up = names.index(lower), names.index(upper)
-        x_lo, x_up = col_of[lower], col_of[upper]
+        x0, y0 = ax.x(centre_of[lower]), ax.y(float(scaled[i_lo]))
+        x1, y1 = ax.x(centre_of[upper]), ax.y(float(scaled[i_up]))
         color = ft.Colors.TERTIARY if lam < 500e-9 else ft.Colors.SECONDARY
-        shapes.extend(ax.arrow(x_lo, float(scaled[i_lo]), x_up, float(scaled[i_up]), color, 1.2))
-        # the label sits at a different fraction of each arrow so that neighbouring lines do not pile their labels up
-        frac = (0.35, 0.55, 0.75)[k % 3]
-        mx = ax.x(x_lo + frac * (x_up - x_lo))
-        my = ax.y(float(scaled[i_lo]) + frac * float(scaled[i_up] - scaled[i_lo]))
-        shapes.append(_label(mx + 3, my - 6, f"{lam * 1e9:.1f} nm", size=8, color=color))
-    shapes.append(
-        _label(
-            8, height - 14, "vertical scale: sqrt(energy), not to scale; arrows: tabulated E1 lines", size=9
+        shapes.extend(
+            ax.arrow(centre_of[lower], float(scaled[i_lo]), centre_of[upper], float(scaled[i_up]), color, 1.2)
         )
+        text = f"{lam * 1e9:.1f} nm"
+        # the wavelength rides its arrow at the first place along it that is clear of every label already set
+        for frac in (0.5, 0.36, 0.64, 0.24, 0.76, 0.14, 0.86):
+            x, y = x0 + frac * (x1 - x0), y0 + frac * (y1 - y0)
+            box, drawn = _backed_label(
+                x - 0.5 * _text_width(text), y - 0.5 * CANVAS_TEXT - 2.0, text, color=color
+            )
+            if not any(box.overlaps(other) for other in boxes):
+                break
+        boxes.append(box)
+        labels += drawn
+    shapes += level_labels + labels
+    return _captioned(
+        cv.Canvas(shapes, width=width, height=height),
+        "Energy not to scale: the axis is broken. Arrows: tabulated E1 lines.",
+        width,
     )
-    return cv.Canvas(shapes, width=width, height=height)
 
 
 def sublevel_fan(rows: Sequence[tuple[str, float]], *, title: str, room: float) -> ft.Control:
-    """Zeeman sublevels of one level as bars at their energies relative to the lowest, labelled (to scale within the level);
-    at most 420 px wide, narrower when ``room`` is."""
-    width, height = min(420.0, room), 150.0
+    """Zeeman sublevels of one level as bars at their energies relative to the lowest (to scale within the level), each
+    named above its bar with its offset beneath; at most 560 px wide, narrower when ``room`` is."""
+    width, height = min(560.0, room), 170.0
     if not rows:
         return ft.Container()
     energies = np.asarray([e for _l, e in rows], dtype=float)
     lo, hi = float(np.min(energies)), float(np.max(energies))
-    ax = Axes(width, height, (0.0, 1.0), (lo, hi if hi > lo else lo + 1.0), margin=(8.0, 20.0, 8.0, 8.0))
-    shapes: list[cv.Shape] = [_label(8, 2, title, size=10)]
-    n = len(rows)
+    ax = Axes(width, height, (0.0, 1.0), (lo, hi if hi > lo else lo + 1.0), margin=(8.0, 38.0, 22.0, 8.0))
+    shapes: list[cv.Shape] = [_label(8, 2, title)]
+    slot = 1.0 / len(rows)
     for k, (label, e) in enumerate(sorted(rows, key=lambda r: r[1])):
-        x0 = 0.05 + 0.9 * k / max(n, 1)
-        shapes.append(
-            cv.Line(
-                ax.x(x0), ax.y(e), ax.x(x0 + 0.85 / max(n, 1)), ax.y(e), paint=_stroke(ft.Colors.PRIMARY, 2.0)
-            )
-        )
-        shapes.append(_label(ax.x(x0), ax.y(e) - 12, f"{label}: {(e - lo) / 1e6:+.3f} MHz", size=8))
+        x0 = (k + 0.08) * slot
+        px, py = ax.x(x0), ax.y(e)
+        shapes.append(cv.Line(px, py, ax.x(x0 + 0.84 * slot), py, paint=_stroke(ft.Colors.PRIMARY, 2.0)))
+        shapes.append(_label(px, py - CANVAS_TEXT - 6.0, label, color=ft.Colors.ON_SURFACE))
+        shapes.append(_label(px, py + 5.0, f"{(e - lo) / 1e6:+.3f} MHz"))
     return cv.Canvas(shapes, width=width, height=height)
 
 
@@ -410,7 +595,7 @@ def crystal_picture(
     """The chain to scale along the trap axis (z) with the mode's displacement pattern as arrows: c_{i,m} along e_hat,
     drawn in the z (horizontal) and x (vertical) plane; a y component is written beside the arrow. At most 520 px wide,
     narrower when ``room`` is."""
-    width, height = min(520.0, room), 170.0
+    width, height = min(520.0, room), 150.0
     pos = np.asarray(positions_m, dtype=float)
     z = pos[:, 2]
     span = float(np.max(z) - np.min(z)) if z.size > 1 else 1e-6
@@ -420,7 +605,7 @@ def crystal_picture(
         height,
         (float(np.min(z)) - 0.35 * span, float(np.max(z)) + 0.35 * span),
         (-1.0, 1.0),
-        margin=(12.0, 18.0, 26.0, 12.0),
+        margin=(12.0, 18.0, 12.0, 12.0),
     )
     shapes: list[cv.Shape] = [
         cv.Line(
@@ -428,11 +613,11 @@ def crystal_picture(
         )
     ]
     if title:
-        shapes.append(_label(8, 2, title, size=10))
+        shapes.append(_label(8, 2, title))
     for i in range(pos.shape[0]):
         shapes.append(cv.Circle(ax.x(float(z[i])), ax.y(0.0), 7, paint=_fill(ft.Colors.PRIMARY)))
         name = species[i] if i < len(species) else ""
-        shapes.append(_label(ax.x(float(z[i])) - 10, ax.y(0.0) + 10, f"ion {i} {name}", size=9))
+        shapes.append(_label(ax.x(float(z[i])) - 10, ax.y(0.0) + 12, f"ion {i} {name}"))
         if eigenvector is not None and e_hat is not None:
             c = float(eigenvector[i])
             dz, dx, dy = c * e_hat[2], c * e_hat[0], c * e_hat[1]
@@ -444,19 +629,14 @@ def crystal_picture(
                         ax.x(float(z[i])) + 8,
                         ax.y(0.0) - 26,
                         f"y: {dy:+.2f}",
-                        size=8,
                         color=ft.Colors.TERTIARY,
                     )
                 )
-    shapes.append(
-        _label(
-            ax.left,
-            height - 12,
-            f"axis span {span * 1e6:.2f} um to scale; arrows: mass-weighted eigenvector components c_i,m (not to the position scale)",
-            size=9,
-        )
+    return _captioned(
+        cv.Canvas(shapes, width=width, height=height),
+        f"Chain to scale over {span * 1e6:.2f} µm; arrows: the mode's eigenvector, on its own scale.",
+        width,
     )
-    return cv.Canvas(shapes, width=width, height=height)
 
 
 def stability_diagram(
@@ -508,8 +688,7 @@ def stability_diagram(
             _label(
                 ax.x(float(qs[len(qs) // 3])),
                 ax.y(float(0.5 * (lo[len(qs) // 3] + hi[len(qs) // 3]))) - 6,
-                "stable: 0 < beta < 1",
-                size=10,
+                "stable: 0 < β < 1",
                 color=ft.Colors.PRIMARY,
             )
         )
@@ -517,9 +696,7 @@ def stability_diagram(
         px, py = ax.x(qv), ax.y(av)
         shapes.append(cv.Circle(px, py, 6, paint=_fill(ft.Colors.SURFACE_CONTAINER_LOWEST)))
         shapes.append(cv.Circle(px, py, 4.5, paint=_fill(ft.Colors.TERTIARY)))
-        shapes.append(
-            _label(px + 8, py - 6, f"{name}: q = {qv:.3f}, a = {av:.4f}", size=9, color=ft.Colors.TERTIARY)
-        )
+        shapes.append(_label(px + 8, py - 6, f"{name}: q = {qv:.3f}, a = {av:.4f}", color=ft.Colors.TERTIARY))
     return cv.Canvas(shapes, width=width, height=height)
 
 
@@ -543,14 +720,16 @@ def beam_geometry(
         height,
         (cz - half, cz + half),
         (-half * height / width, half * height / width),
-        margin=(12.0, 12.0, 24.0, 12.0),
+        margin=(12.0, 12.0, 12.0, 12.0),
     )
     shapes: list[cv.Shape] = []
+    # the beams' names, drawn last on their patches so that no beam strikes one through
+    names: list[cv.Shape] = []
     for i in range(pos.shape[0]):
         shapes.append(
             cv.Circle(ax.x(float(pos[i, 2])), ax.y(float(pos[i, 0])), 6, paint=_fill(ft.Colors.PRIMARY))
         )
-        shapes.append(_label(ax.x(float(pos[i, 2])) - 8, ax.y(float(pos[i, 0])) + 8, f"ion {i}", size=9))
+        shapes.append(_label(ax.x(float(pos[i, 2])) - 8, ax.y(float(pos[i, 0])) + 9, f"ion {i}"))
     for k, k_hat, pointing, color, label in beams:
         z0, x0 = float(pointing[2]), float(pointing[0])
         length = 0.9 * half
@@ -561,7 +740,13 @@ def beam_geometry(
             )
         )
         tag = label + (f" (y {k_hat[1]:+.2f})" if abs(k_hat[1]) > 1e-6 else "")
-        shapes.append(_label(ax.x(start_z) + 4, ax.y(start_x) - 12 - 10 * (k % 3), tag, size=8, color=color))
+        # beside the beam's tail where the tail is in the drawing, else where the beam enters it (a beam's tail lies
+        # outside a drawing scaled to the chain), on the inner side of that edge; neighbours' names take three lines
+        px, py = ax.x(start_z), min(max(ax.y(start_x), 0.0), height)
+        stagger = (CANVAS_TEXT + 2.0) * (k % 3)
+        label_y = py + 3.0 + stagger if py < 0.5 * height else py - CANVAS_TEXT - 5.0 - stagger
+        label_x = min(max(px + 4.0, 2.0), width - _text_width(tag) - 2.0)
+        names += _backed_label(label_x, label_y, tag, color=color)[1]
     bx, bz = float(field_direction[0]), float(field_direction[2])
     shapes.extend(
         ax.arrow(
@@ -573,23 +758,20 @@ def beam_geometry(
             2.0,
         )
     )
+    # the field's name beside the middle of its arrow, clear of the beams' names along the lower edge
     shapes.append(
         _label(
-            ax.x(cz + 0.6 * half),
-            ax.y(-0.9 * half * height / width) + 4,
+            ax.x(cz + 0.6 * half + 0.125 * half * bz) + 8.0,
+            ax.y(-0.9 * half * height / width + 0.125 * half * bx) - 0.5 * CANVAS_TEXT,
             f"B (y {field_direction[1]:+.2f})",
-            size=9,
         )
     )
-    shapes.append(
-        _label(
-            ax.left,
-            height - 12,
-            f"z along the chain, x up; ions to scale over {span * 1e6:.1f} um; beams from their pointing along k",
-            size=9,
-        )
+    shapes += names
+    return _captioned(
+        cv.Canvas(shapes, width=width, height=height),
+        f"From above (z along the chain, x up), to scale over {span * 1e6:.1f} µm; beams along k.",
+        width,
     )
-    return cv.Canvas(shapes, width=width, height=height)
 
 
 @dataclass(frozen=True)
@@ -606,23 +788,24 @@ class PhaseLoop:
 def phase_space(loops: Sequence[PhaseLoop], *, width: float = 420.0, height: float = 300.0) -> ft.Control:
     """Spin-branch loops alpha_im(t) in the complex plane: a closed loop returns to its start (the filled dot); the end is a
     ring. One colour per mode; the pair's second ion dashed (its loop coincides with the first ion's on an in-phase mode and
-    mirrors it on an out-of-phase one)."""
+    mirrors it on an out-of-phase one). The key stands under the drawing, where it covers no loop."""
     palette = list(theme.series())
     filled = [np.asarray(lp.alpha, dtype=complex) for lp in loops if np.asarray(lp.alpha).size]
     allv = np.concatenate(filled) if filled else np.zeros(1, complex)
     r = float(max(np.max(np.abs(allv.real)), np.max(np.abs(allv.imag)), 1e-3)) * 1.15
-    # the frame stops 14 px above the canvas bottom so that the footer line sits below the x-axis title
-    ax = Axes(width, height - 14.0, (-r, r), (-r, r), margin=(44.0, 12.0, 26.0, 12.0))
-    shapes: list[cv.Shape] = ax.frame(
-        "Re alpha", "Im alpha", x_ticks=_ticks(-r, r, 3, ".2f"), y_ticks=_ticks(-r, r, 3, ".2f")
-    )
+    ax = Axes(width, height, (-r, r), (-r, r), margin=(44.0, 20.0, 34.0, 12.0))
+    shapes: list[cv.Shape] = ax.frame(x_ticks=_ticks(-r, r, 3, ".2f"), y_ticks=_ticks(-r, r, 3, ".2f"))
+    # the titles clear of the tick labels: Im α over the frame's corner, Re α under the middle of the axis
+    shapes.append(_label(ax.left, 2.0, "Im α"))
+    shapes.append(_label(ax.left + ax.plot_w / 2 - 14.0, height - 15.0, "Re α"))
     shapes.append(
         cv.Line(ax.x(-r), ax.y(0.0), ax.x(r), ax.y(0.0), paint=_stroke(ft.Colors.OUTLINE_VARIANT, 1.0))
     )
     shapes.append(
         cv.Line(ax.x(0.0), ax.y(-r), ax.x(0.0), ax.y(r), paint=_stroke(ft.Colors.OUTLINE_VARIANT, 1.0))
     )
-    for k, lp in enumerate(loops):
+    key: list[tuple[ft.Control, str]] = []
+    for lp in loops:
         a = np.asarray(lp.alpha, dtype=complex)
         if a.size == 0:
             continue
@@ -634,22 +817,136 @@ def phase_space(loops: Sequence[PhaseLoop], *, width: float = 420.0, height: flo
         shapes.append(
             cv.Circle(ax.x(float(a.real[-1])), ax.y(float(a.imag[-1])), 4, paint=_stroke(color, 2.0))
         )
-        shapes.append(_label(ax.left + 6, ax.top + 4 + 13 * k, f"{lp.label}: {lp.note}", size=9, color=color))
-    shapes.append(
-        _label(
-            ax.left,
-            height - 12,
-            "filled dot: start; ring: end; a closed loop ends on its start; dashed: the pair's second ion",
-            size=9,
+        key.append(
+            (legend_swatch(color, line=True), f"{lp.label}{' (dashed)' if lp.dashed else ''}: {lp.note}")
         )
+    return ft.Column(
+        [
+            cv.Canvas(shapes, width=width, height=height),
+            legend(key, notes=["filled dot: start", "ring: end; a closed loop ends on its start"]),
+        ],
+        spacing=6,
+        tight=True,
     )
-    return cv.Canvas(shapes, width=width, height=height)
 
 
 # ---- charts with flet-charts -------------------------------------------------------------------------------------------------------------
 
 _cap = ft.BorderRadius.only(top_left=3, top_right=3)
 """A bar's rounded data-end, square at the baseline (the dataviz mark spec)."""
+
+
+def _tooltip_ink() -> ft.TextStyle:
+    """The ink of a chart tooltip: the inverse surface's own, as on every other tooltip of the app. The library's default
+    is the series colour, which no single background carries at 4.5:1 for every series; the text names its series
+    instead (no meaning by colour alone)."""
+    return ft.TextStyle(
+        size=theme.SIZE_SMALL, weight=ft.FontWeight.W_500, color=ft.Colors.ON_INVERSE_SURFACE, height=1.35
+    )
+
+
+_TOOLTIP_RADIUS = ft.BorderRadius.all(6)
+_TOOLTIP_PADDING = ft.Padding.symmetric(horizontal=10, vertical=6)
+TOOLTIP_MAX_WIDTH = 260.0
+"""A chart tooltip wraps here; it shifts to stay inside its chart rather than being cut by the card's edge."""
+
+
+def nice_step(span: float, intervals: int) -> float:
+    """1, 2 or 5 times a power of ten: the round step that divides ``span`` into the count nearest ``intervals``."""
+    power = 10.0 ** math.floor(math.log10(span / intervals))
+    return min((m * power for m in (1.0, 2.0, 5.0, 10.0)), key=lambda step: abs(span / step - intervals))
+
+
+def _tick_text(value: float, step: float) -> str:
+    """A tick at the decimals its step needs, so the ticks of one axis read as one column (0.00, 0.05, 0.10)."""
+    decimals = max(0, -int(math.floor(math.log10(step) + 1e-9)))
+    text = f"{value:.{decimals}f}"
+    return text.replace("-", "", 1) if float(text) == 0.0 else text
+
+
+class TickAxis(NamedTuple):
+    """One axis of a line chart: where it starts and ends, and its ticks as (value, text)."""
+
+    lo: float
+    hi: float
+    ticks: list[tuple[float, str]]
+    step: float
+
+
+def linear_axis(lo: float, hi: float, intervals: int, *, snap: bool) -> TickAxis:
+    """Ticks at whole multiples of a nice step. ``snap`` widens the axis to the ticks around the data (the value axis, so
+    the top gridline is a labelled one); without it the axis is the data's own extent (the time axis)."""
+    if hi <= lo:
+        # one value (a flat envelope): the three round ticks around it, at the scale of the value itself
+        step = nice_step(abs(lo) or 1.0, 4)
+        below = math.floor(lo / step)
+        start = (below if lo > below * step else below - 1) * step
+        return TickAxis(
+            start,
+            start + 2 * step,
+            [(start + k * step, _tick_text(start + k * step, step)) for k in range(3)],
+            step,
+        )
+    step = nice_step(hi - lo, intervals)
+    first, last = math.floor(lo / step + 1e-9), math.ceil(hi / step - 1e-9)
+    if snap:
+        lo, hi = first * step, last * step
+    values = [k * step for k in range(first, last + 1) if lo - 1e-9 * step <= k * step <= hi + 1e-9 * step]
+    return TickAxis(lo, hi, [(v, _tick_text(v, step)) for v in values], step)
+
+
+def decade_axis(lo: float, hi: float, intervals: int, *, snap: bool) -> TickAxis:
+    """A log axis over log10 values: a tick per whole decade (every second or third on a long axis), printed as the power
+    of ten it is."""
+    first, last = math.floor(lo + 1e-9), math.ceil(hi - 1e-9)
+    if last <= first:
+        last = first + 1
+    if snap:
+        lo, hi = float(first), float(last)
+    step = max(1, math.ceil((last - first) / intervals))
+    decades = [d for d in range(first, last + 1) if lo - 1e-9 <= d <= hi + 1e-9 and d % step == 0]
+    return TickAxis(lo, hi, [(float(d), power_of_ten(d)) for d in decades], float(step))
+
+
+def _tick_labels(axis: TickAxis) -> list[fc.ChartAxisLabel]:
+    return [
+        fc.ChartAxisLabel(
+            value=v,
+            label=ft.Text(text, size=theme.SIZE_MICRO, color=ft.Colors.ON_SURFACE_VARIANT, no_wrap=True),
+        )
+        for v, text in axis.ticks
+    ]
+
+
+def legend_swatch(color: ft.ColorValue, *, line: bool = False, outlined: bool = False) -> ft.Control:
+    """A legend's key: a short stroke for a line, a square for a bar; the outlined square is the companion bar's wash."""
+    if line:
+        return ft.Container(width=14, height=3, bgcolor=color, border_radius=ft.BorderRadius.all(2))
+    return ft.Container(
+        width=11,
+        height=11,
+        bgcolor=ft.Colors.with_opacity(0.12, color) if outlined else color,
+        border=ft.Border.all(1.5, color) if outlined else None,
+        border_radius=ft.BorderRadius.all(3),
+    )
+
+
+def legend(items: Sequence[tuple[ft.Control, str]], notes: Sequence[str] = ()) -> ft.Control:
+    """A chart's legend on one wrapping line: each key with its name, then any notes (a marked value, a threshold)."""
+    entries: list[ft.Control] = [
+        ft.Row(
+            [swatch, ft.Text(label, size=theme.SIZE_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT)],
+            spacing=5,
+            # tight, or each entry takes a whole line of the wrapping row it sits in
+            tight=True,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        for swatch, label in items
+    ]
+    entries += [ft.Text(note, size=theme.SIZE_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT) for note in notes]
+    return ft.Row(
+        entries, wrap=True, spacing=14, run_spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER
+    )
 
 
 def line_chart(
@@ -662,68 +959,93 @@ def line_chart(
     log_x: bool = False,
     markers: Sequence[tuple[float, str]] = (),
 ) -> ft.Control:
-    """Time series or curves; a log axis is drawn as log10 values with a title saying so (the chart library has none)."""
+    """Time series or curves on gridlines at round values. A log axis is drawn over log10 values and ticked at whole
+    decades printed as powers of ten (the chart library has no log scale); a tiny or huge linear axis is drawn in units of
+    a power of ten that its title names. The value axis's title stands above the chart, upright, and a hovered point says
+    its series and its value as the screens print one."""
     palette = list(theme.series())
-    prepared: list[tuple[np.ndarray, np.ndarray]] = []
+    prepared: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
     for _label, x, y in series:
         xs = np.asarray(x, dtype=float)
         ys = np.asarray(y, dtype=float)
         if log_x:
             keep = xs > 0
-            xs, ys = np.log10(xs[keep]), ys[keep]
+            xs, ys = xs[keep], ys[keep]
         if log_y:
             keep = ys > 0
-            xs, ys = xs[keep], np.log10(ys[keep])
-        prepared.append((xs, ys))
-    # the chart library prints raw tick values, which wrap onto two lines for tiny or huge ranges: a linear axis is drawn
-    # in units of a power of ten and the axis title says which (a log axis already carries its scale)
+            xs, ys = xs[keep], ys[keep]
+        # (the abscissa as drawn, the ordinate as drawn, the ordinate as it is, which the tooltip prints)
+        prepared.append((np.log10(xs) if log_x else xs, np.log10(ys) if log_y else ys, ys))
+    drawn = [(xs, ys, true) for xs, ys, true in prepared if ys.size]
+    if not drawn:
+        return ft.Text("nothing to plot", size=12, italic=True, color=ft.Colors.ON_SURFACE_VARIANT)
+    # a linear axis over a tiny or huge range is drawn in units of a power of ten, named beside the title, so that its
+    # ticks stay short (a log axis already carries its scale)
     scale_note = ""
-    top = max((float(np.nanmax(np.abs(ys))) for _xs, ys in prepared if ys.size), default=0.0)
+    top = max(float(np.nanmax(np.abs(ys))) for _xs, ys, _true in drawn)
     if not log_y and math.isfinite(top) and top > 0.0 and (top < 1e-2 or top >= 1e4):
         exponent = int(math.floor(math.log10(top)))
-        prepared = [(xs, ys / 10.0**exponent) for xs, ys in prepared]
-        scale_note = f" (x 1e{exponent})"
+        prepared = [(xs, ys / 10.0**exponent, true) for xs, ys, true in prepared]
+        drawn = [(xs, ys, true) for xs, ys, true in prepared if ys.size]
+        scale_note = f" (× {power_of_ten(exponent)})"
+    x_lo = min(float(np.nanmin(xs)) for xs, _ys, _true in drawn)
+    x_hi = max(float(np.nanmax(xs)) for xs, _ys, _true in drawn)
+    y_lo = min(float(np.nanmin(ys)) for _xs, ys, _true in drawn)
+    y_hi = max(float(np.nanmax(ys)) for _xs, ys, _true in drawn)
+    x_axis = (decade_axis if log_x else linear_axis)(x_lo, x_hi, 7, snap=False)
+    y_axis = (decade_axis if log_y else linear_axis)(y_lo, y_hi, 4, snap=True)
+    ink = _tooltip_ink()
     data = [
         fc.LineChartData(
-            points=[fc.LineChartDataPoint(x=float(a), y=float(b)) for a, b in zip(xs, ys)],
+            points=[
+                fc.LineChartDataPoint(
+                    x=float(a),
+                    y=float(b),
+                    tooltip=fc.LineChartDataPointTooltip(
+                        text=f"{label}: {fmt_number(float(c))}", text_style=ink
+                    ),
+                )
+                for a, b, c in zip(xs, ys, true)
+            ],
             stroke_width=2,
             color=palette[k % len(palette)],
             rounded_stroke_cap=True,
         )
-        for k, (xs, ys) in enumerate(prepared)
+        for k, ((label, _x, _y), (xs, ys, true)) in enumerate(zip(series, prepared))
     ]
-    if not data:
-        return ft.Text("nothing to plot", size=12, italic=True, color=ft.Colors.ON_SURFACE_VARIANT)
     chart: ft.Control = fc.LineChart(
         data_series=data,
         height=height,
-        left_axis=fc.ChartAxis(
-            title=_axis_title(("log10 " if log_y else "") + y_title + scale_note), label_size=48
-        ),
+        min_x=x_axis.lo,
+        max_x=x_axis.hi,
+        min_y=y_axis.lo,
+        max_y=y_axis.hi,
+        # the library asks for a label at every multiple of the spacing and draws the ones it is handed
+        left_axis=fc.ChartAxis(labels=_tick_labels(y_axis), label_spacing=y_axis.step, label_size=44),
         bottom_axis=fc.ChartAxis(
-            title=_axis_title(("log10 " if log_x else "") + x_title),
-            label_size=24,
-            show_min=False,
-            show_max=False,
+            title=_axis_title(x_title), labels=_tick_labels(x_axis), label_spacing=x_axis.step, label_size=22
         ),
-        horizontal_grid_lines=_grid(),
+        horizontal_grid_lines=fc.ChartGridLines(
+            interval=y_axis.step, color=ft.Colors.OUTLINE_VARIANT, width=1
+        ),
+        tooltip=fc.LineChartTooltip(
+            bgcolor=ft.Colors.INVERSE_SURFACE,
+            border_radius=_TOOLTIP_RADIUS,
+            padding=_TOOLTIP_PADDING,
+            max_width=TOOLTIP_MAX_WIDTH,
+            fit_inside_horizontally=True,
+            fit_inside_vertically=True,
+        ),
         interactive=True,
     )
-    legend_items: list[ft.Control] = [
-        ft.Row(
-            [
-                ft.Container(width=12, height=3, bgcolor=palette[k % len(palette)], border_radius=2),
-                ft.Text(label, size=10, color=ft.Colors.ON_SURFACE_VARIANT),
-            ],
-            spacing=4,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        )
-        for k, (label, _x, _y) in enumerate(series)
-    ]
-    legend_items += [
-        ft.Text(f"| {text}", size=10, color=ft.Colors.ON_SURFACE_VARIANT) for _v, text in markers
-    ]
-    return ft.Column([chart, ft.Row(legend_items, wrap=True, spacing=10)], spacing=4)
+    key = legend(
+        [
+            (legend_swatch(palette[k % len(palette)], line=True), label)
+            for k, (label, _x, _y) in enumerate(series)
+        ],
+        notes=[text for _v, text in markers],
+    )
+    return ft.Column([_axis_title(y_title + scale_note), chart, key], spacing=6)
 
 
 @dataclass(frozen=True)
@@ -758,7 +1080,9 @@ def bar_chart(
     interactive: bool = True,
 ) -> ft.Control:
     """Grouped bars, thin with a rounded data end, on hairline gridlines (the dataviz mark specs); labelled below by group
-    (every ``label_every``-th), on the left at ``y_ticks`` when given; ``on_tap`` receives a tapped group's index."""
+    (every ``label_every``-th), on the left at ``y_ticks`` when given, the value axis's title upright above the chart;
+    ``on_tap`` receives a tapped group's index."""
+    ink = _tooltip_ink()
     chart_groups = [
         fc.BarChartGroup(
             x=k,
@@ -769,7 +1093,7 @@ def bar_chart(
                     width=bar_width,
                     color=ft.Colors.with_opacity(0.12, b.color) if b.outlined else b.color,
                     border_side=ft.BorderSide(1.5, b.color) if b.outlined else None,
-                    tooltip=b.tooltip,
+                    tooltip=fc.BarChartRodTooltip(text=b.tooltip, text_style=ink),
                     border_radius=_cap,
                 )
                 for b in bars
@@ -783,6 +1107,18 @@ def bar_chart(
         if on_tap is not None and e.type == fc.ChartEventType.TAP_UP and e.group_index is not None:
             on_tap(int(e.group_index))
 
+    if not y_ticks:
+        # no ticks named: round ones over the bars, in the charts' own label style rather than the library's
+        top = (
+            max_y
+            if max_y is not None
+            else max((b.value for _label, bars in groups for b in bars), default=1.0)
+        )
+        axis = linear_axis(0.0, top if top > 0.0 else 1.0, 4, snap=True)
+        y_ticks = [v for v, _text in axis.ticks if max_y is None or v <= max_y * (1.0 + 1e-9)]
+        if max_y is None:
+            max_y = axis.hi
+    y_step = y_ticks[1] - y_ticks[0] if len(y_ticks) > 1 else None
     chart: ft.Control = fc.BarChart(
         groups=chart_groups,
         bottom_axis=fc.ChartAxis(
@@ -804,22 +1140,27 @@ def bar_chart(
                 )
                 for v in y_ticks
             ],
+            # the library asks for a label at every multiple of the spacing and draws the ones it is handed
+            label_spacing=y_step,
             label_size=40,
-            title=_axis_title(y_title) if y_title else None,
         ),
-        horizontal_grid_lines=fc.ChartGridLines(
-            interval=y_ticks[1] - y_ticks[0] if len(y_ticks) > 1 else None,
-            color=ft.Colors.OUTLINE_VARIANT,
-            width=1,
-        ),
+        horizontal_grid_lines=fc.ChartGridLines(interval=y_step, color=ft.Colors.OUTLINE_VARIANT, width=1),
         max_y=max_y,
         min_y=0.0,
         height=height,
         width=width,
+        tooltip=fc.BarChartTooltip(
+            bgcolor=ft.Colors.INVERSE_SURFACE,
+            border_radius=_TOOLTIP_RADIUS,
+            padding=_TOOLTIP_PADDING,
+            max_width=TOOLTIP_MAX_WIDTH,
+            fit_inside_horizontally=True,
+            fit_inside_vertically=True,
+        ),
         interactive=interactive,
         on_event=on_event if on_tap is not None else None,
     )
-    return chart
+    return ft.Column([_axis_title(y_title), chart], spacing=6) if y_title else chart
 
 
 def two_histograms(bright: np.ndarray, dark: np.ndarray, threshold: float | None) -> ft.Control:
@@ -837,28 +1178,28 @@ def two_histograms(bright: np.ndarray, dark: np.ndarray, threshold: float | None
             (
                 str(k),
                 [
-                    Bar(pb, f"bright: P({k}) = {pb:.3e}"),
-                    Bar(pd, f"dark: P({k}) = {pd:.3e}", color=ft.Colors.TERTIARY),
+                    Bar(pb, f"bright ion: P({k}) = {fmt_number(pb)}"),
+                    Bar(pd, f"dark ion: P({k}) = {fmt_number(pd)}", color=ft.Colors.TERTIARY),
                 ],
             )
         )
-    legend = ft.Row(
-        [
-            ft.Container(width=12, height=12, bgcolor=ft.Colors.PRIMARY, border_radius=3),
-            ft.Text("bright ion", size=11, color=ft.Colors.ON_SURFACE_VARIANT),
-            ft.Container(width=12, height=12, bgcolor=ft.Colors.TERTIARY, border_radius=3),
-            ft.Text("dark ion", size=11, color=ft.Colors.ON_SURFACE_VARIANT),
-            ft.Text(
-                "" if threshold is None else f"| bright declared above n_c = {threshold:g}",
-                size=11,
-                color=ft.Colors.ON_SURFACE_VARIANT,
-            ),
-        ],
-        spacing=6,
-        wrap=True,
+    key = legend(
+        [(legend_swatch(ft.Colors.PRIMARY), "bright ion"), (legend_swatch(ft.Colors.TERTIARY), "dark ion")],
+        notes=[] if threshold is None else [f"called bright above {threshold:g} counts"],
     )
     return ft.Column(
-        [bar_chart(groups, bar_width=9, height=200, label_every=max(1, n_show // 10)), legend], spacing=4
+        [
+            bar_chart(
+                groups,
+                bar_width=9,
+                height=200,
+                label_every=max(1, n_show // 10),
+                x_title="photons counted",
+                y_title="probability",
+            ),
+            key,
+        ],
+        spacing=6,
     )
 
 
@@ -870,12 +1211,14 @@ def fock_bars(start: np.ndarray, end: np.ndarray) -> ft.Control:
         bars = []
         if start.size:
             a = float(start[k]) if k < start.size else 0.0
-            bars.append(Bar(a, f"start: P({k}) = {a:.3e}", outlined=True, color=ft.Colors.TERTIARY))
+            bars.append(Bar(a, f"start: P({k}) = {fmt_number(a)}", outlined=True, color=ft.Colors.TERTIARY))
         if end.size:
             b = float(end[k]) if k < end.size else 0.0
-            bars.append(Bar(b, f"end: P({k}) = {b:.3e}"))
+            bars.append(Bar(b, f"end: P({k}) = {fmt_number(b)}"))
         groups.append((str(k), bars))
-    return bar_chart(groups, bar_width=10, height=150, max_y=1.0)
+    return bar_chart(
+        groups, bar_width=10, height=150, max_y=1.0, y_ticks=(0.0, 0.5, 1.0), x_title="vibration number n"
+    )
 
 
 def bloch_disc(
@@ -892,9 +1235,9 @@ def bloch_disc(
         cv.Circle(cx, cy, r, paint=_stroke(ft.Colors.OUTLINE_VARIANT, 1.0)),
         cv.Line(cx - r, cy, cx + r, cy, paint=_stroke(ft.Colors.OUTLINE_VARIANT, 0.6, [3, 3])),
         cv.Line(cx, cy - r, cx, cy + r, paint=_stroke(ft.Colors.OUTLINE_VARIANT, 0.6, [3, 3])),
-        _label(cx - 6, 0.0, "|0>", size=9),
-        _label(cx - 6, size - 12.0, "|1>", size=9),
-        _label(size - 14.0, cy - 6, "+x", size=9),
+        _label(cx - 7, -2.0, "|0⟩"),
+        _label(cx - 7, size - 12.0, "|1⟩"),
+        _label(size - 15.0, cy - 7, "+x"),
     ]
     ax = Axes(size, size, (-1.0, 1.0), (-1.0, 1.0), margin=(8.0, 8.0, 8.0, 8.0))
     if target is not None:
@@ -914,7 +1257,11 @@ def bloch_disc(
         [
             canvas,
             ft.Text(f"ion {ion}", size=12, weight=ft.FontWeight.W_600),
-            ft.Text(f"length {length:.3f}, <Y> {y:+.2f}", size=10, color=ft.Colors.ON_SURFACE_VARIANT),
+            ft.Text(
+                f"length {length:.3f} · ⟨Y⟩ {y:+.2f}",
+                size=theme.SIZE_CAPTION,
+                color=ft.Colors.ON_SURFACE_VARIANT,
+            ),
         ],
         spacing=0,
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,

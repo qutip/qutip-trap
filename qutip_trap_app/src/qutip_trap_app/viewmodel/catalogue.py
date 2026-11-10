@@ -54,11 +54,46 @@ SI_PREFIXES: tuple[tuple[str, float], ...] = (
     ("p", 1e-12),
     ("f", 1e-15),
 )
+
+
+def unit_text(unit: str) -> str:
+    """A catalogue unit as the screens print it (``UNIT_TEXT``), for a title or an axis that names the unit alone."""
+    return UNIT_TEXT.get(unit, unit)
+
+
 SI_UNITS: frozenset[str] = frozenset({"Hz", "s", "m", "W", "V", "T", "Pa"})
 """The units a value is written with an SI prefix in (``147.1 kHz``, ``1.699 µs``)."""
-UNIT_TEXT: dict[str, str] = {"1/s": "s⁻¹"}
-"""A catalogue unit as it is printed."""
-_SUPERSCRIPT = str.maketrans("0123456789-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻")
+UNIT_TEXT: dict[str, str] = {
+    "1/s": "s⁻¹",
+    "1/kg": "kg⁻¹",
+    "Hz/G^2": "Hz/G²",
+    "W/m^2": "W/m²",
+    "rad^2/s": "rad²/s",
+    "T^2/(rad/s)": "T²/(rad/s)",
+    "(V/m)^2/(rad/s)": "(V/m)²/(rad/s)",
+}
+"""A catalogue unit as it is printed: its powers set as powers."""
+_SUPERSCRIPT_DIGITS = "⁰¹²³⁴⁵⁶⁷⁸⁹⁻"
+_SUPERSCRIPT = str.maketrans("0123456789-", _SUPERSCRIPT_DIGITS)
+_PLAIN_DIGITS = str.maketrans(_SUPERSCRIPT_DIGITS, "0123456789-")
+
+
+def power_of_ten(exponent: int) -> str:
+    """``10⁻⁴``: ten to a whole power, the exponent a superscript (a chart's decade tick, a scientific value's scale)."""
+    return f"10{str(exponent).translate(_SUPERSCRIPT)}"
+
+
+def split_power_of_ten(text: str) -> tuple[str, str, str]:
+    """A formatted value around its superscript exponent: ``4.972 × 10⁻⁴ rad`` as (``4.972 × 10``, ``-4``, `` rad``), the
+    exponent in plain digits so that a screen can set it raised in the value's own face; a value with no exponent is
+    (the text, "", "")."""
+    start = next((k for k, ch in enumerate(text) if ch in _SUPERSCRIPT_DIGITS), None)
+    if start is None:
+        return text, "", ""
+    end = start
+    while end < len(text) and text[end] in _SUPERSCRIPT_DIGITS:
+        end += 1
+    return text[:start], text[start:end].translate(_PLAIN_DIGITS), text[end:]
 
 
 def fmt_scientific(value: float) -> str:
@@ -66,7 +101,7 @@ def fmt_scientific(value: float) -> str:
     mantissa, exponent = f"{value:.3e}".split("e")
     if "." in mantissa:
         mantissa = mantissa.rstrip("0").rstrip(".")
-    return f"{mantissa} × 10{str(int(exponent)).translate(_SUPERSCRIPT)}"
+    return f"{mantissa} × {power_of_ten(int(exponent))}"
 
 
 def fmt_decimal(value: float) -> str:
@@ -91,7 +126,9 @@ def fmt_number(value: float, unit: str = "") -> str:
     if value == 0.0:
         return f"0 {UNIT_TEXT.get(unit, unit)}".strip()
     if unit in SI_UNITS and abs(value) >= SI_PREFIXES[-1][1]:
-        prefix, scale = next((p, sc) for p, sc in SI_PREFIXES if abs(value) >= sc)
+        # the prefix of the value as printed: 999 999.9 Hz prints at four digits as 1 MHz, never as 1000 kHz
+        printed = float(f"{abs(value):.4g}")
+        prefix, scale = next((p, sc) for p, sc in SI_PREFIXES if printed >= sc)
         return f"{fmt_decimal(value / scale)} {prefix}{unit}"
     text = fmt_scientific(value) if abs(value) < 1e-3 or abs(value) >= 1e4 else fmt_decimal(value)
     return f"{text} {UNIT_TEXT.get(unit, unit)}".strip()
@@ -154,7 +191,7 @@ _ROWS: tuple[tuple[str, str, str, str, int, str, str], ...] = (
     ("bitstring", "The outcome as bits, qubit 0 rightmost", "bitstring, qubit0_lsb", "", 0, "13", "conv.result_bit_order"),
     ("spam_eps_b", "Chance a bright ion is read as dark", "eps_B", "", 0, "8.4", "conv.readout_figure_of_merit"),
     ("spam_eps_d", "Chance a dark ion is read as bright", "eps_D", "", 0, "8.4", "conv.readout_figure_of_merit"),
-    ("prep_error", "Chance the ion did not start in |0>", "preparation error", "", 0, "4.2.6", "conv.preparation_stage_order"),
+    ("prep_error", "Chance the ion did not start in |0⟩", "preparation error", "", 0, "4.2.6", "conv.preparation_stage_order"),
     ("photon_count", "Photons the detector counted from this ion", "n per ion per shot", "counts", 0, "8.2", "conv.readout_chain_exact"),
     ("detection_window", "How long the detector looked", "t_det", "s", 0, "8.3", "conv.readout_detected_line"),
     ("threshold", "Counts above which the ion is called bright", "n_c (half-integer)", "counts", 0, "8.3", "anchor.m5.myerson_optimum_and_recursion"),
@@ -214,7 +251,7 @@ _ROWS: tuple[tuple[str, str, str, str, int, str, str], ...] = (
     ("measurement_event", "When the detection light is on", "measure event", "s", 2, "7.2", "conv.terminal_measurement_event"),
     ("beat_phase", "Where the two-tone beat starts", "beat-note phase at the gate start", "rad", 2, "7.10", "conv.beat_phase_at_gate_start"),
     # Level 3, the dynamics
-    ("P1", "Probability the qubit is in |1>", "P1(t) = <|1><1|>", "", 3, "5.7", "conv.computational_ordering"),
+    ("P1", "Probability of finding the qubit in 1", "P1(t) = <|1><1|>", "", 3, "5.7", "conv.computational_ordering"),
     ("coherence", "How much superposition the qubit holds", "|rho_01|(t)", "", 3, "5.7", "conv.computational_ordering"),
     ("mode_nbar", "Average number of vibration quanta in this mode", "<n_m>(t)", "quanta", 3, "5.1", "conv.zero_point_energy"),
     ("alpha_m", "Where the mode is in phase space", "<a_m>(t)", "", 3, "4.4.1", "conv.ms_closure"),
@@ -309,7 +346,7 @@ _ROWS: tuple[tuple[str, str, str, str, int, str, str], ...] = (
     ("cooling_coefficient", "Cooling coefficient of the stage", "A_-", "1/s", 4, "4.2.2", "anchor.m3.doppler_rate_framework"),
     ("doppler_limit", "Where the stage's cooling stops", "nbar = A_+/(A_- - A_+)", "quanta", 4, "4.2.1", "anchor.m3a.doppler_limit"),
     ("stage_duration", "How long a preparation stage lasts", "t_stage", "s", 4, "4.2.6", "conv.preparation_stage_order"),
-    ("pump_photons", "Photons scattered while pumping the ion into |0>", "N_photons", "", 4, "4.2.6", "anchor.m3.optical_pumping_recoil"),
+    ("pump_photons", "Photons scattered while pumping the ion into |0⟩", "N_photons", "", 4, "4.2.6", "anchor.m3.optical_pumping_recoil"),
     ("recoil_heating", "Vibration quanta added by the pumping photons", "Delta n", "quanta", 4, "4.2.8", "anchor.m3.optical_pumping_recoil"),
     ("participation", "Share of the mode's motion the cooled ions carry", "W_k = sum_j c_{j,k}^2", "", 4, "4.1.7", "conv.level_a_rates_participation"),
     # Level 4, the readout page
