@@ -53,6 +53,11 @@ untyped_calls_exclude = ["flet"]
 module = ["qutip", "qutip.*", "scipy", "scipy.*", "flet_charts", "flet_charts.*", "yaml"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# the browser's JavaScript scope and the Pyodide runtime, importable only under WebAssembly
+module = ["js", "pyodide", "pyodide.*"]
+ignore_missing_imports = true
+
 [tool.flet]
 org = "org.qutip"
 product = "qutip-trap-app"

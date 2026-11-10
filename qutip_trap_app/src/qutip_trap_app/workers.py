@@ -1,16 +1,20 @@
-"""The simulation worker: core calls in a separate process, progress and results streamed back (PLAN.md Section 14.6).
+"""The simulation worker: core calls off the UI's thread, progress and results streamed back (PLAN.md Section 14.6).
 
 One long-lived worker holds the live state a record cannot carry (the device, the calibration table, the core's run record,
 the channel library) keyed by the record's run key, so that a zoom or a verify-deeper request needs no re-run. Requests and
 results are picklable values; progress events name a stage, a fraction where one is known and a message. A cancel terminates
-the process and restarts it: the caches live in the records the UI keeps, so only the live handles are lost. The process is
-not daemonic, so the core's own parallel maps may spawn inside it; under WebAssembly (no processes) a request runs in the
-page's thread when it is submitted.
+the worker and restarts it: the caches live in the records the UI keeps, so only the live handles are lost.
+
+Where the worker runs is its :class:`Transport`, chosen once where the application starts (:func:`platform_transport`): a
+spawned process natively (not daemonic, so the core's own parallel maps may spawn inside it), and in the browser, which has
+no processes, a second Python runtime in a Web Worker, or the page's own runtime for a device that cannot hold two.
 """
 
 from __future__ import annotations
 
+import asyncio
 import multiprocessing as mp
+import pickle
 import queue
 import sys
 import time
@@ -18,7 +22,7 @@ import traceback
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from qutip_trap_app import core, resim
 from qutip_trap_app import device_layer as layer_mod
@@ -62,10 +66,6 @@ class Event:
 
 class WorkerError(RuntimeError):
     """A request failed in the worker; the message carries the worker's traceback."""
-
-
-IN_PROCESS = sys.platform == "emscripten"
-"""WebAssembly has no processes: a request runs in the page's own thread at ``submit`` time, its events read afterwards."""
 
 
 # ---- the requests ---------------------------------------------------------------------------------------------------------------
@@ -332,8 +332,34 @@ def _worker_main(requests: Any, results: Any) -> None:
         _run(state, results, item)
 
 
-class _ProcessTransport:
+class Transport(Protocol):
+    """Where the worker's requests run. ``results`` is a queue of :class:`Event` read with ``get``/``get_nowait``."""
+
+    results: Any
+
+    @property
+    def alive(self) -> bool:
+        """Whether requests put now will be answered."""
+
+    @property
+    def failure(self) -> str:
+        """Why the transport stopped answering, when it knows; empty while alive and when it does not."""
+
+    def put(self, item: _Item) -> None:
+        """Queue one request; its events arrive on ``results``."""
+
+    def stop(self, timeout_s: float) -> None:
+        """End the worker, first letting the request in flight finish for up to ``timeout_s`` where the transport can
+        wait for it."""
+
+    def kill(self) -> None:
+        """End the worker now, whatever it is doing."""
+
+
+class ProcessTransport:
     """The worker in a spawned, non-daemonic process."""
+
+    failure = ""
 
     def __init__(self) -> None:
         ctx = mp.get_context("spawn")
@@ -366,17 +392,26 @@ class _ProcessTransport:
             self.process.join(2.0)
 
 
-class _InProcessTransport:
-    """The worker in the page's own thread: a request runs when it is submitted, its events wait in a queue."""
+INLINE_START_DELAY_S = 0.1
+"""How long an inline request waits on the event loop before it starts: the renders its submission caused are sent first,
+so the screen shows the job as running before the loop is held."""
+
+
+class InlineTransport:
+    """The worker on the caller's own thread and event loop: one Python runtime instead of two (about 300 MB less in a
+    browser), and nothing else runs while a request does: no progress arrives, no click is answered and a cancel cannot
+    interrupt. A request starts ``INLINE_START_DELAY_S`` after it is put, never inside ``put``."""
 
     alive = True
+    failure = ""
 
     def __init__(self) -> None:
         self.state = _LiveState()
         self.results: Any = queue.Queue()
+        self._loop = asyncio.get_running_loop()
 
     def put(self, item: _Item) -> None:
-        _run(self.state, self.results, item)
+        self._loop.call_later(INLINE_START_DELAY_S, _run, self.state, self.results, item)
 
     def stop(self, timeout_s: float) -> None:
         return None
@@ -385,11 +420,109 @@ class _InProcessTransport:
         return None
 
 
-class SimulationWorker:
-    """One worker; submit requests, poll events, or wait for one ticket."""
+WEB_WORKER_SCRIPT = "simulation-worker.js"
+"""The simulation worker's script (``src/assets``), served beside the script of the worker that runs the page's Python."""
+
+
+class WebWorkerTransport:
+    """The worker in a second Python runtime, in a Web Worker started from the one that runs the page's Python: the
+    browser's stand-in for a process. Requests and events cross as pickles; ``kill`` terminates the Web Worker.
+
+    The script boots the runtime the page itself was loaded with, from the same two URLs (both in the browser's cache by
+    then), and hands over to :func:`serve_web_worker`; requests put meanwhile wait for the boot. A boot or script failure
+    arrives as ``failure`` and the transport is no longer alive."""
 
     def __init__(self) -> None:
-        self._transport: _ProcessTransport | _InProcessTransport | None = None
+        import js
+        from pyodide.ffi import create_proxy, to_js
+
+        self.results: Any = queue.Queue()
+        self.failure = ""
+        self._to_js = to_js
+        self._proxies = [create_proxy(self._on_message), create_proxy(self._on_error)]
+        self._worker: Any = js.Worker.new(WEB_WORKER_SCRIPT, type="module")
+        self._worker.onmessage, self._worker.onerror = self._proxies
+        # Flet's worker script keeps what it booted this runtime from on its global scope, relative to its own address
+        here = js.location.href
+        boot = {
+            "pyodideUrl": str(js.URL.new(js.pyodideUrl, here).href),
+            "appPackageUrl": str(js.URL.new(js.appPackageUrl, here).href),
+        }
+        self._worker.postMessage(to_js(boot, dict_converter=js.Object.fromEntries))
+
+    @property
+    def alive(self) -> bool:
+        return self._worker is not None and not self.failure
+
+    def _on_message(self, message: Any) -> None:
+        data = message.data
+        if isinstance(data, str):
+            self.failure = data
+        else:
+            self.results.put(pickle.loads(data.to_py()))
+
+    def _on_error(self, error: Any) -> None:
+        self.failure = f"the simulation worker's script failed: {error.message}"
+
+    def put(self, item: _Item) -> None:
+        self._worker.postMessage(self._to_js(pickle.dumps(item)))
+
+    def stop(self, timeout_s: float) -> None:
+        self.kill()
+
+    def kill(self) -> None:
+        if self._worker is None:
+            return
+        self._worker.terminate()
+        self._worker = None
+        for proxy in self._proxies:
+            proxy.destroy()
+
+
+def serve_web_worker() -> Callable[[Any], None]:
+    """Inside the simulation Web Worker, called once by its script: the function the script hands every later message to.
+    A message is one pickled request; its events are posted back as pickles while it runs, so progress reaches the page
+    during a solve."""
+    import js
+    from pyodide.ffi import to_js
+
+    state = _LiveState()
+
+    class Outbox:
+        def put(self, event: Event) -> None:
+            js.postMessage(to_js(pickle.dumps(event)))
+
+    outbox = Outbox()
+
+    def handle(message: Any) -> None:
+        _run(state, outbox, pickle.loads(message.to_py()))
+
+    return handle
+
+
+IN_BROWSER = sys.platform == "emscripten"
+"""Whether this Python runs under WebAssembly in a browser, which has Web Workers and no processes."""
+
+
+def _browser_transport() -> Callable[[], Transport]:
+    """A browser's transport: a Web Worker, or the page's own runtime when the page's address asks ``?worker=inline``."""
+    import js
+
+    inline = js.URL.new(js.documentUrl).searchParams.get("worker") == "inline"
+    return InlineTransport if inline else WebWorkerTransport
+
+
+def platform_transport() -> Callable[[], Transport]:
+    """The transport this platform runs the worker on, resolved once where the application starts."""
+    return _browser_transport() if IN_BROWSER else ProcessTransport
+
+
+class SimulationWorker:
+    """One worker on the given transport; submit requests, poll events, or wait for one ticket."""
+
+    def __init__(self, transport: Callable[[], Transport] = ProcessTransport) -> None:
+        self._new_transport = transport
+        self._transport: Transport | None = None
         self._buffer: list[Event] = []
 
     @property
@@ -401,9 +534,16 @@ class SimulationWorker:
         """Whether a worker was started and not deliberately stopped; with ``alive`` False this means it died."""
         return self._transport is not None
 
+    @property
+    def failure(self) -> str:
+        """Why a started worker is no longer alive, when its transport knows."""
+        return "" if self._transport is None else self._transport.failure
+
     def start(self) -> None:
         if not self.alive:
-            self._transport = _InProcessTransport() if IN_PROCESS else _ProcessTransport()
+            if self._transport is not None:
+                self._transport.kill()  # a transport that died: release what it still holds
+            self._transport = self._new_transport()
 
     def stop(self, timeout_s: float = 5.0) -> None:
         if self._transport is not None:

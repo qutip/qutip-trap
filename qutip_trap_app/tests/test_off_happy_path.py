@@ -205,6 +205,7 @@ def test_a_dead_worker_fails_its_jobs_and_is_restarted() -> None:
     class _Dead:
         alive = False
         started = True
+        failure = ""
 
         def start(self) -> None:
             started.append("start")
@@ -223,6 +224,11 @@ def test_a_dead_worker_fails_its_jobs_and_is_restarted() -> None:
     )
     assert store.jobs["t0"].stage == "done" and started == ["start"] and "died" in store.error
     assert not session.worker_died(), "reported once: the jobs are done now"
+    # a transport that knows why it stopped says so, in the job and in the banner
+    _Dead.failure = "the simulation worker failed: HTTP 404 for app.zip"
+    store.jobs = {"t2": JobStatus("t2", "run_job")}
+    assert session.worker_died()
+    assert store.jobs["t2"].error == _Dead.failure and store.error.startswith(_Dead.failure)
 
 
 @pytest.fixture(scope="module")

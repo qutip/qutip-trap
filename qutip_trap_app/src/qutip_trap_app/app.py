@@ -13,6 +13,7 @@ from qutip_trap_app.provenance import ProvenanceIndex
 from qutip_trap_app.views import theme
 from qutip_trap_app.views.shell import App
 from qutip_trap_app.views.state import Session, Store
+from qutip_trap_app.workers import platform_transport
 
 
 def main(page: ft.Page) -> None:
@@ -26,7 +27,9 @@ def main(page: ft.Page) -> None:
     # must be attached to the page (page.services) or its get/set never round-trips to the client
     preferences = ft.SharedPreferences()
     page.services = [preferences]
-    session = Session(store, ProvenanceIndex.load(), page, preferences=preferences)
+    session = Session(
+        store, ProvenanceIndex.load(), page, preferences=preferences, transport=platform_transport()
+    )
     session.start()
     page.run_task(session.restore_learner)
     page.run_task(session.poll_forever)
