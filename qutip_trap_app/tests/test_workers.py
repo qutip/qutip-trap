@@ -58,8 +58,8 @@ def test_the_worker_runs_in_a_process_natively() -> None:
 
 
 async def test_an_inline_request_starts_after_its_submission_returns() -> None:
-    """The inline transport runs on the caller's event loop. A request that ran inside ``submit`` would hold the loop
-    before the screen had shown it as running, so it starts a moment later; its events are there on a later poll."""
+    """A request that ran inside ``submit`` would hold the caller's event loop before the screen had shown it as running:
+    it starts a moment later, and its events are there on a later poll."""
     worker = SimulationWorker(InlineTransport)
     ticket = worker.submit("zoom", key="nope", step=0)
     assert worker.poll() == [], "nothing ran inside submit"
@@ -70,7 +70,7 @@ async def test_an_inline_request_starts_after_its_submission_returns() -> None:
 
 def test_a_transport_that_died_is_released_before_its_replacement() -> None:
     """A transport that stopped answering still holds what it started (a Web Worker, its callbacks): the next start ends
-    it and reports nothing of its failure for the new one."""
+    it, and its failure is not the new one's."""
     made: list[_Flaky] = []
 
     class _Flaky:

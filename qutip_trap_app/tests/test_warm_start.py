@@ -8,8 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from qutip_trap_app import core, workers
-from qutip_trap_app.provenance import ProvenanceIndex
+from qutip_trap_app import core, device_layer, provenance, workers
 from qutip_trap_app.views.state import Session, Store
 from qutip_trap_app.warm_start import derive
 from qutip_trap_app.workers import HANDLERS, initial_state
@@ -21,42 +20,38 @@ def test_a_checkout_worker_starts_with_nothing() -> None:
     assert state.stability is None
 
 
-def test_a_packaged_worker_answers_the_start_up_job_without_deriving(
+def test_a_packaged_worker_answers_the_start_up_requests_without_deriving(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    def new_process() -> None:
+        """Nothing calibrated yet, as in a process that has just started."""
+        monkeypatch.setattr(core.CALIBRATION_CACHE, "reports", {})
+
     store = Store()
-    job = Session(store, ProvenanceIndex.load()).build_job()
-    request = store.engine.request
-    monkeypatch.setattr(core.CALIBRATION_CACHE, "reports", {})
+    job = Session(store, provenance.ProvenanceIndex.load()).build_job()
+    run = HANDLERS[store.engine.request]
+    new_process()
     cold_stages: list[str] = []
-    cold = HANDLERS[request](
-        initial_state(), lambda stage, fraction, message: cold_stages.append(stage), job=job
-    )
+    cold = run(initial_state(), lambda stage, fraction, message: cold_stages.append(stage), job=job)
     assert "channels" in cold_stages, "a worker that starts with nothing derives the channel library"
 
-    # a packaged build: no PLAN.md beside the core, the warm start beside the app, nothing calibrated in the process yet
-    monkeypatch.setattr(core.CALIBRATION_CACHE, "reports", {})
+    new_process()
     asset = tmp_path / "warm_start.pkl"
     asset.write_bytes(pickle.dumps(derive()))
-    monkeypatch.setattr(core.CALIBRATION_CACHE, "reports", {})
+
+    # a packaged build: no PLAN.md beside the core, the warm start beside the app
+    new_process()
+    monkeypatch.setattr(provenance, "repository_root", lambda: tmp_path)
     monkeypatch.setattr(workers, "WARM_START_PATH", asset)
-    monkeypatch.setattr(core, "repository_root", lambda: tmp_path)
+    monkeypatch.setattr(device_layer, "stability_map", lambda: pytest.fail("the boundary was derived again"))
     state = initial_state()
     calibrated = set(core.CALIBRATION_CACHE.reports)
-    channels = {key: set(library.entries) for key, library in state.libraries.items()}
-    assert calibrated and channels and state.presets
+    assert calibrated and state.presets and state.libraries and state.stability is not None
 
     stages: list[str] = []
-    record = HANDLERS[request](state, lambda stage, fraction, message: stages.append(stage), job=job)
+    record = run(state, lambda stage, fraction, message: stages.append(stage), job=job)
     assert "channels" not in stages, "no channel was derived"
     assert set(core.CALIBRATION_CACHE.reports) == calibrated, "no calibration was derived"
-    assert {key: set(library.entries) for key, library in state.libraries.items()} == channels
-    assert record.key() == cold.key(), "the run itself is the one a cold worker computes"
-
-    boundary = state.stability
-    messages: list[str] = []
-    layer = HANDLERS["derive"](
-        state, lambda stage, fraction, message: messages.append(message), device=store.device_ref()
-    )
-    assert boundary is not None and layer.trap.stability is boundary and state.stability is boundary
-    assert not any("stability boundary, once" in m for m in messages), "the boundary was not computed again"
+    assert record.key() == cold.key(), "the run is the one a worker that starts with nothing computes"
+    layer = HANDLERS["derive"](state, lambda stage, fraction, message: None, device=store.device_ref())
+    assert layer.trap.stability is state.stability

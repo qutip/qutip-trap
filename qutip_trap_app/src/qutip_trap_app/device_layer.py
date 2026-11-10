@@ -216,7 +216,7 @@ class StabilityMap:
 
 
 def stability_map() -> StabilityMap:
-    """The stability boundary on q in [0, 1] (25 points, bisected to 2e-4). It is device-independent and takes over a
+    """The stability boundary on q in [0, 1] (25 points, bisected to 2e-4). No device changes it and it takes over a
     thousand monodromy integrations (seconds in a browser), so the worker computes it once and keeps it."""
     q_max, points, tolerance = 1.0, 25, 2e-4
     calls = 0
@@ -1362,7 +1362,7 @@ def derive_device_layer(
     progress: Progress | None = None,
 ) -> DeviceLayer:
     """The device layer of a built preset: the analytic re-derivation of Section 14.4 in one call. ``stability`` is
-    :func:`stability_map`, which the caller computes once for every device."""
+    :func:`stability_map`, which the caller computes once for all devices."""
     t_all = time.perf_counter()
     device = preset.device
     notes: list[str] = []
