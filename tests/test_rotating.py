@@ -191,7 +191,7 @@ def test_rotating_frame_of_the_real_hamiltonian_is_theta_dag_v_theta(ms_fixture)
         assert c_a is a2 and c_z is space.sigma_z(1)
         omega2 = built.mode_frequencies_rad_s[2]
         assert eigen_frequency(a2, rot.frame.energies) == pytest.approx(-omega2, rel=1e-12)
-        assert any("global one of the post-jump state" in n for n in rot.notes)
+        assert any("global on the post-jump state" in n for n in rot.notes)
         # a recoil kick is not an eigenoperator of H_0: the segment keeps the Schroedinger picture
         kick = space.embed_many({0: qudit_sigma_plus(2), 2: displacement_operator(10, 0.1j)})
         assert rotating_frame(built.H, space.dims, [a2, kick]) is None
@@ -315,10 +315,9 @@ def test_engine_rotating_frame_on_the_trajectory_path_matches_per_trajectory(ms_
 
 
 def test_a_factorized_sum_applies_its_terms_at_once_in_their_order() -> None:
-    """Every term kind at once (the sigma_+ and sigma_- of two ions over two mode factors, a diagonal ion factor, one mode
-    factor, a bare slice, a zero factor): the sum equals the assembled sum to 1e-13 on one column and on three, the terms of
-    one arrangement share a batch, and it equals the term-by-term sum element for element (the contributions arrive in the
-    terms' order)."""
+    """Every term kind at once (the sigma_+ and sigma_- of two ions over two mode factors, a diagonal ion factor, a single
+    mode factor, a bare slice, a zero factor): the terms of one arrangement share a batch, and the sum equals the assembled
+    sum to 1e-13 and the term-by-term sum element for element, on one column and on three."""
     dims = (2, 2, 5, 6)
     n = int(np.prod(dims))
     d1 = displacement_operator(5, 0.2j).full()
@@ -339,11 +338,9 @@ def test_a_factorized_sum_applies_its_terms_at_once_in_their_order() -> None:
     ]
     coefs = np.array([0.7 + 0.2j, 0.7 - 0.2j, -0.3j, 0.3j, 0.25, 1.5 - 0.5j, 0.5, 9.0], dtype=complex)
     fused = FactorizedSum(ops)
-    assert [b.k for b, _ks in fused._batches][:1] == [4], (
-        "the four drive terms of the register share one batch"
-    )
+    assert fused._batches[0][0].k == 4, "the four drive terms of the register share one batch"
     for ncols in (1, 3):
-        x = np.ascontiguousarray(_random_vector(n, 8, ncols=ncols).reshape(n, ncols))
+        x = _random_vector(n, 8, ncols=ncols)
         expected = sum(c * (op.to_array() @ x) for c, op in zip(coefs, ops))
         got = fused.apply(x, coefs)
         assert got.shape == (n, ncols) and np.max(np.abs(got - expected)) < 1e-13, ncols

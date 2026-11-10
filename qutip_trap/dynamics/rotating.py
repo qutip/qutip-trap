@@ -11,10 +11,10 @@ the results equal the Schroedinger-picture integration to the solver tolerance, 
 detuning frequencies instead of the Fock energies.
 
 A constant collapse operator that is an eigenoperator of ad_{H_0} (the heating ladder operators, sigma_z, a^dag a) is
-e^{i lambda t} c in the frame, and the trajectories take it as c: the two have one dissipator, one c^dag c and one jump rate,
-and the phase would only multiply a post-jump state, globally, so ``mcsolve`` keeps one constant c^dag c instead of
-evaluating |e^{i lambda t}|^2 at every right-hand side. Any other collapse operator (a recoil kick, the time-dependent
-intensity-noise channel) keeps the segment in the Schroedinger picture.
+e^{i lambda t} c in the frame, and the trajectories take it as c: the two share a dissipator, a c^dag c and a jump rate, and
+the phase only multiplies a post-jump state globally, so ``mcsolve`` keeps one constant c^dag c instead of evaluating
+|e^{i lambda t}|^2 at every right-hand side. Any other collapse operator (a recoil kick, the time-dependent intensity-noise
+channel) keeps the segment in the Schroedinger picture.
 """
 
 from __future__ import annotations
@@ -150,22 +150,21 @@ def eigen_frequency(op: qt.Qobj, energies: np.ndarray) -> float | None:
 
 
 class SumProgram:
-    """How a fixed list of operator data is applied as sum_k c_k A_k, decided once for the list: the factorized operators as
-    one :class:`~qutip_trap.dynamics.kernels.FactorizedSum` (their positions in ``factorized``), every other operator by
-    QuTiP's ``matmul`` into the same output, in list order after them."""
+    """How a fixed list of operator data applies as sum_k c_k A_k, decided once: the factorized operators (at the positions
+    ``factorized``) as one :class:`~qutip_trap.dynamics.kernels.FactorizedSum`, then every other operator by QuTiP's
+    ``matmul`` into the same output, in list order."""
 
     __slots__ = ("factorized", "fused", "operators", "others")
 
     def __init__(self, operators: Sequence[Data]) -> None:
         self.operators = tuple(operators)
-        positions = [k for k, op in enumerate(self.operators) if isinstance(op, FactorizedOperator)]
-        self.others = tuple(
-            k for k, op in enumerate(self.operators) if not isinstance(op, FactorizedOperator)
-        )
+        is_factorized = [isinstance(op, FactorizedOperator) for op in self.operators]
+        positions = [k for k, f in enumerate(is_factorized) if f]
+        self.others = tuple(k for k, f in enumerate(is_factorized) if not f)
         self.fused = FactorizedSum([self.operators[k] for k in positions]) if positions else None
-        # every operator factorized (the common case) reads the coefficient vector whole
+        # when every operator is factorized (the common case) the coefficient vector is read whole
         self.factorized: np.ndarray | slice = (
-            slice(None) if len(positions) == len(self.operators) else np.array(positions, dtype=np.intp)
+            slice(None) if not self.others else np.array(positions, dtype=np.intp)
         )
 
     def apply(self, x: np.ndarray, values: np.ndarray) -> np.ndarray:
@@ -188,8 +187,8 @@ class PhasedSum(Data):  # type: ignore[misc]
 
     ``terms`` are (coefficient value, operator data) pairs, ``theta`` the unit-modulus phase vector e^{-i E t} of shape (D,)
     or None for no phase. Applied matrix-free: the state is phased once, the terms apply through their :class:`SumProgram`
-    (the factorized ones together) into one output, and the output is phased back. QuTiP converts it to Dense for anything
-    but ``matmul`` on a Dense state.
+    into one output, and the output is phased back. QuTiP converts it to Dense for anything but ``matmul`` on a Dense
+    state.
     """
 
     def __init__(
@@ -221,8 +220,7 @@ class PhasedSum(Data):  # type: ignore[misc]
         theta: np.ndarray | None,
         n: int,
     ) -> PhasedSum:
-        """The constructor without the checks, on a program built once, for the per-evaluation path of
-        :class:`RotatingDrive`."""
+        """The constructor without the checks, on a program built once: :class:`RotatingDrive`'s per-evaluation path."""
         self = cls.__new__(cls)
         self.dims = dims
         self.program = program
@@ -310,8 +308,8 @@ _register_data_type()
 class RotatingDrive:
     """The ``QobjEvo`` function element t -> Qobj of the rotating-frame value of a sum of ``[operator, coefficient]`` terms:
     the builder's coefficients evaluated at t over the operators' data with the frame's phase vector, every term times
-    ``scale``. With no frame (``frame=None``, ``dims`` then given) it is the Schroedinger-picture value of the same sum:
-    the terms still apply through one :class:`SumProgram`, the factorized ones as one batch, instead of one dispatch each."""
+    ``scale``. Without a frame (``frame=None``, ``dims`` given) it is the sum's Schroedinger-picture value, its terms still
+    applied through one :class:`SumProgram`, the factorized ones as one batch."""
 
     def __init__(
         self,
@@ -319,17 +317,19 @@ class RotatingDrive:
         operators: Sequence[Data],
         coefficients: Sequence[object],
         scale: complex = 1.0,
-        *,
         dims: Sequence[int] | None = None,
     ) -> None:
         if len(operators) != len(coefficients):
             raise ValueError("one coefficient per operator")
-        if frame is None and dims is None:
+        if frame is not None:
+            if dims is not None and tuple(dims) != frame.dims:
+                raise ValueError("the dims are the frame's")
+            self.dims = frame.dims
+        elif dims is not None:
+            self.dims = tuple(int(d) for d in dims)
+        else:
             raise ValueError("a drive without a frame names its space's dims")
         self.frame = frame
-        self.dims = tuple(int(d) for d in (dims if dims is not None else frame.dims))  # type: ignore[union-attr]
-        if frame is not None and frame.dims != self.dims:
-            raise ValueError("the dims are the frame's")
         self.operators = tuple(operators)
         self.coefficients = tuple(coefficients)
         self.scale = complex(scale)
@@ -360,23 +360,13 @@ class RotatingDrive:
         return qobj
 
     def __reduce__(self) -> tuple[object, ...]:
-        return (_rebuild_drive, (self.frame, self.operators, self.coefficients, self.scale, self.dims))
-
-
-def _rebuild_drive(
-    frame: FrameEnergies | None,
-    operators: Sequence[Data],
-    coefficients: Sequence[object],
-    scale: complex,
-    dims: Sequence[int],
-) -> RotatingDrive:
-    return RotatingDrive(frame, operators, coefficients, scale, dims=dims)
+        return (RotatingDrive, (self.frame, self.operators, self.coefficients, self.scale, self.dims))
 
 
 def batched_drive(H: qt.QobjEvo, dims: Sequence[int]) -> qt.QobjEvo:
-    """``H`` in the Schroedinger picture with its ``[operator, coefficient]`` terms in one :class:`RotatingDrive` element
-    without a frame, so that its factorized drive terms apply as one batch; ``H`` itself when it holds fewer than two
-    factorized terms or a function element."""
+    """``H`` with its ``[operator, coefficient]`` terms gathered into one frameless :class:`RotatingDrive`, so that its
+    factorized drive terms apply as one batch in the Schroedinger picture; ``H`` itself when it holds a function element or
+    fewer than two factorized terms."""
     parts = _split_terms(H)
     if parts is None:
         return H
@@ -426,9 +416,9 @@ def frame_energies_of(static: qt.Qobj, dims: Sequence[int]) -> FrameEnergies | N
 
 
 def rotating_collapse(op: qt.Qobj | qt.QobjEvo, frame: FrameEnergies) -> qt.Qobj | None:
-    """A constant collapse operator as the trajectories take it in the rotating frame: itself, when it is an eigenoperator of
-    ad_{H_0} (e^{i lambda t} c jumps as c does, up to a global phase of the post-jump state); None for a non-eigenoperator or
-    a time-dependent one."""
+    """A constant collapse operator as the trajectories take it in the rotating frame: itself when it is an eigenoperator of
+    ad_{H_0} (e^{i lambda t} c jumps as c does, up to a global phase of the post-jump state), None otherwise or when it
+    depends on time."""
     if not isinstance(op, qt.Qobj):
         return None
     if eigen_frequency(op, frame.energies) is None:
@@ -467,7 +457,7 @@ def rotating_frame(
     notes: list[str] = []
     if n_phase:
         notes.append(
-            f"{n_phase} collapse operator(s) jump as c where the rotating frame has e^(i lambda t) c: one dissipator and "
-            "one jump rate, the phase a global one of the post-jump state"
+            f"{n_phase} collapse operator(s) are e^(i lambda t) c in the rotating frame and jump as c: the same dissipator "
+            "and jump rate, the phase global on the post-jump state"
         )
     return RotatingSegment(qt.QobjEvo(drive), tuple(rotated), frame, tuple(notes))

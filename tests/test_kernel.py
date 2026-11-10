@@ -500,7 +500,7 @@ def test_section_11_1_rows_factorized_against_assembled_final_states_and_cost(mo
                 # of the source level
                 for term in (el[0].data for el in h.to_list() if isinstance(el, list)):
                     assert [kind for _f, kind, _m in term.term.steps] == ["dense"] * nmodes, (nmodes, nmax)
-                    ops = _Batch([term.term]).layout(1).ops
+                    ops = _Batch([term.term]).ops(1)
                     macs = sum(lead * d * d * trail for _code, lead, d, trail in ops)
                     assert macs == psi0.shape[0] // 2 * nmodes * nmax, (nmodes, nmax, macs)
         assert (finals[True] - finals[False]).norm() < 2e-7, (nmodes, nmax)

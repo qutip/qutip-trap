@@ -9,11 +9,10 @@ segment builds the assembled CSR operator). The factors are the per-mode exponen
 group's sum-generator exponential is not a product, so a drive on an ENR mode is never factorized.
 
 The ``auto`` choice of ``BuilderOptions.kernel`` is the cost model below, fitted through ``PhasedSum.apply`` (the rotating
-frame's right-hand side) over the sigma_+ and sigma_- terms of one to four ions on spaces of dimension 24 to 2048: the
-assembled terms cost their non-zeros at 0.45 ns (0.59 ns per stored one), the factorized ones the elements of their
-gathered source blocks at 6.5 ns (gather, two products and scatter) and every product of a middle mode factor; a
-factorized register is the cheaper on every space with two resolved modes or more, and the assembled one on a single mode
-below a few dozen states.
+frame's right-hand side) to the sigma_+ and sigma_- terms of one to four ions on spaces of dimension 24 to 2048: assembled
+terms cost 0.45 ns per non-zero, factorized ones 6.5 ns per element of their gathered source blocks (the gather, two
+products and the scatter) plus every product of a middle mode factor. Factorized wins on every space with two resolved
+modes or more, assembled on a single mode of a few dozen states.
 """
 
 from __future__ import annotations
@@ -29,17 +28,17 @@ from qutip.core.data import Data, Dense
 KernelChoice = Literal["auto", "factorized", "assembled"]
 
 COST_ASSEMBLED_US = 2.41
-"""What an evaluation of assembled drive terms costs whatever their number (us): the phases, the zero fill, the dispatch."""
+"""An evaluation of assembled drive terms, whatever their number (us): the phases, the zero fill, the dispatch."""
 COST_ASSEMBLED_TERM_US = 0.25
 """Per assembled term (us)."""
 COST_ASSEMBLED_NS_PER_NNZ = 0.45
-"""Per non-zero of an assembled term (ns), counted as D prod_m d_m / d_ion: the CSR product's memory-bound rate (0.59 ns
-per stored non-zero) over the elements the conversion keeps."""
+"""Per non-zero of an assembled term (ns), counted as D prod_m d_m / d_ion: the memory-bound CSR product's 0.59 ns per
+stored non-zero, over the elements the conversion keeps."""
 COST_FACTORIZED_US = 3.21
-"""What an evaluation of factorized drive terms costs whatever their number (us): the phases and one batch's calls."""
+"""An evaluation of factorized drive terms, whatever their number (us): the phases and one batch's calls."""
 COST_FACTORIZED_NS_PER_ELEMENT = 6.47
-"""Per element of the terms' gathered source blocks (ns): the gather, the products of the leading and trailing mode factors
-and the scatter."""
+"""Per element of the terms' gathered source blocks (ns): the gather, the first and last mode factors' products and the
+scatter."""
 COST_FACTORIZED_MIDDLE_US = 0.086
 """Per matrix product of a middle mode factor (us), one per level of the factors before it (three modes or more)."""
 
@@ -52,8 +51,8 @@ def _prod(values: Sequence[int]) -> int:
 
 
 def _middle_products(dims: Sequence[int], ion_factor: int, mode_factors: Sequence[int]) -> int:
-    """The matrix products the middle mode factors of one term take in its block's layout (``_Term.order``): the first mode
-    leads, the last trails, and a middle one is applied once per level of every kept factor before it."""
+    """The matrix products one term's middle mode factors take in its block's layout (``_Term.order``): the first mode leads,
+    the last trails, and a middle one takes a product per level of every kept factor before it."""
     modes = sorted(int(f) for f in mode_factors)
     if len(modes) < 3:
         return 0
@@ -87,8 +86,8 @@ def kernel_costs_us(
 
 
 def prefer_factorized(dims: Sequence[int], ion_factor: int, mode_factors: Sequence[int]) -> bool:
-    """The ``auto`` rule for one ion's drive terms: factorize when the cost model says their factorized batch is the cheaper
-    (a register's batch of several ions only widens the margin)."""
+    """The ``auto`` rule for one ion's drive terms: factorize when their factorized batch is the cheaper (batching more ions
+    only widens the margin)."""
     if not mode_factors:
         return False
     assembled, factorized = kernel_costs_us(dims, [ion_factor], mode_factors)
@@ -121,7 +120,7 @@ class FactorizedOperator(Data):  # type: ignore[misc]
         n = _prod(dims_t)
         super().__init__((n, n))
         self.term = _term(dims_t, facs, self.scale)
-        self._alone: FactorizedSum | None = None
+        self._single: _Single | None = None
 
     def copy(self) -> FactorizedOperator:
         return FactorizedOperator(self.dims, {k: v.copy() for k, v in self.factors.items()}, self.scale)
@@ -149,14 +148,12 @@ class FactorizedOperator(Data):  # type: ignore[misc]
         if a.shape[0] != self.shape[0]:
             raise ValueError(f"state of dimension {a.shape[0]} does not live on dims {self.dims}")
         a2 = np.ascontiguousarray(a.reshape(-1, 1) if vector else a, dtype=complex)
-        alone = self._alone
-        if alone is None:
-            alone = self._alone = FactorizedSum([self])
-        single = alone._single
-        if single is not None:
-            out = single.apply(a2, complex(scale))
+        if self.term.prefactor == 0.0:
+            out = np.zeros(a2.shape, dtype=complex)
         else:
-            out = np.zeros(a2.shape, dtype=complex)  # a zero operator: no live term
+            if self._single is None:
+                self._single = _Single(_Batch([self.term]), 0)
+            out = self._single.apply(a2, complex(scale))
         return out.reshape(-1) if vector else out
 
     @property
@@ -175,11 +172,11 @@ _COLUMNS = -1
 
 
 class _Term(NamedTuple):
-    """How one factorized operator is applied, read off its factors once: every factor with a single non-zero element is a
-    slice of the source block into the target block (``sliced``: factor, target row, source column), its element folded into
+    """How one factorized operator is applied, read off its factors once. A factor with a single non-zero element is a slice
+    of the source block into the target block (``sliced``: factor, target row, source column), its element folded into
     ``prefactor`` with the scale; every other named factor is a step (``steps``: factor, kind, matrix or diagonal, in
     ascending factor order), the prefactor folded into the first; ``tail`` multiplies the slice when no step is left (a bare
-    sigma_+), and is 1 otherwise. A factor with no non-zero element makes the prefactor 0: the term is zero."""
+    sigma_+) and is 1 otherwise. A factor with no non-zero element makes the prefactor, and the term, zero."""
 
     dims: tuple[int, ...]
     sliced: tuple[tuple[int, int, int], ...]
@@ -188,15 +185,20 @@ class _Term(NamedTuple):
     tail: complex
 
     @property
+    def kept(self) -> list[int]:
+        """The factors the block keeps (every one not sliced), in ascending order."""
+        sliced = {f for f, _r, _c in self.sliced}
+        return [f for f in range(len(self.dims)) if f not in sliced]
+
+    @property
     def order(self) -> tuple[int, ...]:
-        """The axes of the term's block in application order, ``_COLUMNS`` for the state's column axis: the first step's
-        factor leads when there are two steps or more, the last step's factor trails (after the column axis) when it is
-        dense, and every other kept factor sits between them in ascending order."""
-        kept = [f for f in range(len(self.dims)) if f not in {s for s, _r, _c in self.sliced}]
+        """The block's axes in application order, ``_COLUMNS`` for the state's column axis: with two steps or more the first
+        step's factor leads, a dense last step's factor trails (after the column axis), and the other kept factors sit
+        between them in ascending order."""
         steps = self.steps
         trail = steps[-1][0] if steps and steps[-1][1] == "dense" else None
         lead = steps[0][0] if len(steps) >= 2 and steps[0][1] == "dense" else None
-        middle = [f for f in kept if f not in (lead, trail)]
+        middle = [f for f in self.kept if f not in (lead, trail)]
         return tuple(
             ([lead] if lead is not None else [])
             + middle
@@ -207,7 +209,7 @@ class _Term(NamedTuple):
     @property
     def arrangement(self) -> tuple[object, ...]:
         """What the terms of one batch share: the block's shape in application order and every step's place and kind. The
-        drive terms of the ions of one register share it (each slices a different ion's factor out of the same shape)."""
+        drive terms of a register share it, each slicing a different ion's factor out of the same shape."""
         order = self.order
         return (
             self.dims,
@@ -242,23 +244,26 @@ def _term(dims: tuple[int, ...], factors: Mapping[int, np.ndarray], scale: compl
     return _Term(dims, tuple(sliced), steps, prefactor, 1.0 + 0.0j if folded else prefactor)
 
 
+_Op = tuple[str, int, int, int]
+"""How a block is reshaped around one step, (code, lead, d, trail): "left", the step's factor leads and the step is one
+product A @ (d, trail); "right", it trails, (lead, d) @ A^T; "middle", a product batched over the lead levels before it;
+"diag", a broadcast product."""
+
+
 class _Layout(NamedTuple):
-    """A batch's gathered block for one column count: the flat source and target index of every element of every term's
-    block (rows: terms), and per step how the block is reshaped around it ("left": the step's factor leads and the step is one
-    product A @ (d, rest); "right": it trails, (rest, d) @ A^T; "middle": a product batched over the factors before it;
-    "diag": a broadcast product), as (code, lead, d, trail)."""
+    """A batch's index arrays for one column count: the flat source and target index of every element of every term's
+    block (rows: terms), in the block's application order."""
 
     gather: np.ndarray
     scatter: np.ndarray
-    ops: tuple[tuple[str, int, int, int], ...]
 
 
 class _Batch:
-    """Terms of one arrangement applied together: one gather of every term's source block, one batched product per step and
-    the rows of the result in the block order the scatter reads.
+    """Terms of one arrangement applied together: one gather of every term's source block, one batched product per step,
+    and the rows of the result in the order the scatter reads.
 
-    The block is laid out (``_Term.order``) so that each step is a single matrix product per term: two mode factors cost two
-    BLAS calls per term, against one per level of the factors before the middle one in the unpermuted block. Each step
+    The block is laid out (``_Term.order``) so that each step is one matrix product per term: two mode factors cost two
+    BLAS calls per term, where the unpermuted block costs one per level of the factors before the second. Each step
     multiplies the same elements in the same order as a product along that axis of the unpermuted block, so the layout
     changes the number of calls, not the arithmetic.
     """
@@ -283,23 +288,34 @@ class _Batch:
         self.mats = tuple(mats)
         self.tail = np.array([t.tail for t in terms], dtype=complex)
         self._layouts: dict[int, _Layout] = {}
-        self._ops: dict[int, tuple[tuple[str, int, int, int], ...]] = {}
+        self._ops: dict[int, tuple[_Op, ...]] = {}
 
     def layout(self, ncols: int) -> _Layout:
         lay = self._layouts.get(ncols)
         if lay is None:
-            lay = _Layout(
-                self._block_index(ncols, "source"), self._block_index(ncols, "target"), self.ops(ncols)
-            )
+            lay = _Layout(self._block_index(ncols, "source"), self._block_index(ncols, "target"))
             self._layouts[ncols] = lay
         return lay
 
-    def ops(self, ncols: int) -> tuple[tuple[str, int, int, int], ...]:
-        """How the block is reshaped around every step at ``ncols`` columns (``_Layout.ops``), without the index arrays."""
+    def ops(self, ncols: int) -> tuple[_Op, ...]:
+        """How the block is reshaped around each step at ``ncols`` columns."""
         ops = self._ops.get(ncols)
         if ops is None:
-            ops = self._build_ops(ncols)
-            self._ops[ncols] = ops
+            shape = [ncols if n == _COLUMNS else n for n in self.shape]
+            order = self.orders[0]
+            built: list[_Op] = []
+            for f, kind, _m in self.terms[0].steps:
+                p = order.index(f)
+                if kind == "diag":
+                    code = "diag"
+                elif p == 0:
+                    code = "left"
+                elif p == len(shape) - 1:
+                    code = "right"
+                else:
+                    code = "middle"
+                built.append((code, _prod(shape[:p]), shape[p], _prod(shape[p + 1 :])))
+            ops = self._ops[ncols] = tuple(built)
         return ops
 
     def _block_index(self, ncols: int, which: Literal["source", "target"]) -> np.ndarray:
@@ -310,37 +326,18 @@ class _Batch:
             index: list[int | slice] = [slice(None)] * (len(dims) + 1)
             for f, r, c in t.sliced:
                 index[f] = c if which == "source" else r
-            kept = [f for f in range(len(dims)) if f not in {s for s, _r, _c in t.sliced}] + [_COLUMNS]
-            perm = [kept.index(f) for f in order]
-            rows.append(np.ascontiguousarray(base[tuple(index)].transpose(perm)).reshape(-1))
+            kept = [*t.kept, _COLUMNS]
+            rows.append(
+                np.ascontiguousarray(base[tuple(index)].transpose([kept.index(f) for f in order])).reshape(-1)
+            )
         return np.stack(rows)
 
-    def _build_ops(self, ncols: int) -> tuple[tuple[str, int, int, int], ...]:
-        shape = [ncols if n == _COLUMNS else n for n in self.shape]
-        order = self.orders[0]
-        ops: list[tuple[str, int, int, int]] = []
-        for f, kind, _m in self.terms[0].steps:
-            p = order.index(f)
-            lead, d, trail = _prod(shape[:p]), shape[p], _prod(shape[p + 1 :])
-            if kind == "diag":
-                ops.append(("diag", lead, d, trail))
-            elif p == 0:
-                ops.append(("left", lead, d, trail))
-            elif p == len(shape) - 1:
-                ops.append(("right", lead, d, trail))
-            else:
-                ops.append(("middle", lead, d, trail))
-        return tuple(ops)
-
     def transform(self, x_flat: np.ndarray, ncols: int, alpha: np.ndarray) -> np.ndarray:
-        """Row k: alpha[k] x term k on its source block of the flattened (D, ncols) state ``x_flat``, in the layout's order."""
-        return self.steps(x_flat[self.layout(ncols).gather], ncols, alpha)
-
-    def steps(self, y: np.ndarray, ncols: int, alpha: np.ndarray) -> np.ndarray:
-        """Row k: alpha[k] x term k on its gathered source block ``y`` (row k, in the layout's order); alpha rides on the
-        first step's matrix (d^2 multiplications) rather than on the block."""
+        """Row k: alpha[k] x term k on its source block of the flattened (D, ncols) state ``x_flat``, in the layout's order;
+        alpha rides on the first step's matrix (d^2 multiplications) rather than on the block."""
         k = self.k
         ops = self.ops(ncols)
+        y: np.ndarray = x_flat[self.layout(ncols).gather]
         for s, (code, lead, d, trail) in enumerate(ops):
             m = self.mats[s]
             if s == 0:
@@ -358,13 +355,24 @@ class _Batch:
         return y.reshape(k, -1)
 
 
-class _Single:
-    """A sum of one live term applied through views: its source block is a slice of the state (no index array), put in the
-    layout's order by a transpose, the batch's steps applied to it as two-dimensional products, and the result assigned into
-    the slice of the target block; the same elements multiplied in the same order as the batch's gather, steps and
-    scatter, with none of their per-term bookkeeping."""
+class _SinglePlan(NamedTuple):
+    """A lone term at one column count: the state's tensor shape, the block's shape in application order and unpermuted,
+    whether the two share a memory order (only length-one axes move), and each step with its matrix."""
 
-    __slots__ = ("_plans", "batch", "inverse", "perm", "position", "sliced", "source", "tail", "target")
+    state: tuple[int, ...]
+    layout: tuple[int, ...]
+    natural: tuple[int, ...]
+    in_order: bool
+    steps: tuple[tuple[str, int, int, int, np.ndarray], ...]
+
+
+class _Single:
+    """One live term applied through views: the source block is a slice of the state, put in application order by a
+    transpose; the batch's steps act on it as two-dimensional products; the result is assigned into the slice of the target
+    block. The same elements are multiplied in the same order as by the batch's gather, steps and scatter, without the
+    index arrays."""
+
+    __slots__ = ("_plans", "batch", "inverse", "perm", "position", "source", "tail", "target", "writes_slice")
 
     def __init__(self, batch: _Batch, position: int) -> None:
         (term,) = batch.terms
@@ -377,41 +385,39 @@ class _Single:
             source[f], target[f] = c, r
         self.source = tuple(source)
         self.target = tuple(target)
-        kept = [f for f in range(len(dims)) if f not in {s for s, _r, _c in term.sliced}] + [_COLUMNS]
+        kept = [*term.kept, _COLUMNS]
         self.perm = tuple(kept.index(f) for f in batch.orders[0])
         self.inverse = tuple(int(i) for i in np.argsort(self.perm))
-        self.sliced = bool(term.sliced)
+        self.writes_slice = bool(term.sliced)
         self.tail = complex(batch.tail[0])
         self._plans: dict[int, _SinglePlan] = {}
 
-    def _plan(self, ncols: int) -> _SinglePlan:
-        """How the term applies at ``ncols`` columns (``_SinglePlan``)."""
-        plan = self._plans.get(ncols)
-        if plan is None:
-            batch = self.batch
-            dims = batch.terms[0].dims
-            state = dims + (ncols,)
-            layout = tuple(ncols if n == _COLUMNS else n for n in batch.shape)
-            natural = tuple(state[f] for f in range(len(state)) if not isinstance(self.source[f], int))
-            # the transposes only move length-one axes (the column axis at one column): the memory order is the layout's
-            moved = [p for p in self.perm if natural[p] > 1]
-            steps = tuple((*op, m[0]) for op, m in zip(batch.ops(ncols), batch.mats))
-            plan = _SinglePlan(state, layout, natural, moved == sorted(moved), steps)
-            self._plans[ncols] = plan
+    def _build_plan(self, ncols: int) -> _SinglePlan:
+        batch = self.batch
+        state = batch.terms[0].dims + (ncols,)
+        natural = tuple(n for n, idx in zip(state, self.source) if not isinstance(idx, int))
+        moved = [p for p in self.perm if natural[p] > 1]
+        plan = _SinglePlan(
+            state,
+            tuple(ncols if n == _COLUMNS else n for n in batch.shape),
+            natural,
+            moved == sorted(moved),
+            tuple((*op, m[0]) for op, m in zip(batch.ops(ncols), batch.mats)),
+        )
+        self._plans[ncols] = plan
         return plan
 
     def apply(self, x: np.ndarray, alpha: complex) -> np.ndarray:
         """alpha x the term @ x for a C-contiguous complex (D, ncols) ``x``: a new (D, ncols) array."""
         ncols = x.shape[1]
-        plan = self._plans.get(ncols) or self._plan(ncols)
+        plan = self._plans.get(ncols)
+        if plan is None:
+            plan = self._build_plan(ncols)
         view = x.reshape(plan.state)[self.source]
         y = np.ascontiguousarray(view if plan.in_order else view.transpose(self.perm))
-        first = True
-        for code, lead, d, trail, m in plan.steps:
-            if first:
-                if alpha != 1.0:  # QuTiP's dispatch passes scale 1 and applies the coefficient itself
-                    m = m * alpha
-                first = False
+        for s, (code, lead, d, trail, m) in enumerate(plan.steps):
+            if s == 0 and alpha != 1.0:  # QuTiP's dispatch passes scale 1 and applies the coefficient itself
+                m = m * alpha
             if code == "left":
                 y = m @ y.reshape(d, trail)
             elif code == "right":
@@ -420,25 +426,14 @@ class _Single:
                 y = np.matmul(m, y.reshape(lead, d, trail))
             else:
                 y = y.reshape(lead, d, trail) * m[None, :, None]
-        if first:
+        if not plan.steps:
             y = y * (self.tail * alpha)
         result = y.reshape(plan.natural) if plan.in_order else y.reshape(plan.layout).transpose(self.inverse)
-        if not self.sliced:
+        if not self.writes_slice:
             return np.ascontiguousarray(result).reshape(-1, ncols)
         out = np.zeros(plan.state, dtype=complex)
         out[self.target] = result
         return out.reshape(-1, ncols)
-
-
-class _SinglePlan(NamedTuple):
-    """A lone term at one column count: the state's tensor shape, the block's layout shape and its natural (unpermuted)
-    shape, whether the layout is the natural memory order (only length-one axes move), and every step with its matrix."""
-
-    state: tuple[int, ...]
-    layout: tuple[int, ...]
-    natural: tuple[int, ...]
-    in_order: bool
-    steps: tuple[tuple[str, int, int, int, np.ndarray], ...]
 
 
 class _Scatter(NamedTuple):
@@ -454,14 +449,14 @@ class _Scatter(NamedTuple):
 class FactorizedSum:
     """sum_k c_k A_k applied to a state at once, for factorized operators A_k on one product space.
 
-    The terms of one arrangement share a :class:`_Batch` (the drive terms of a register, sigma_+^i or sigma_-^i (x) prod_m D_m,
-    differ only in the slice they read and write and in their factor matrices), so a step costs one batched product for all
-    of them. The results are added in the terms' order, in runs of consecutive terms whose target blocks are disjoint, so that
-    every element receives its contributions in the order a term-by-term loop gives it. A zero term (a factor with no
-    non-zero element) contributes nothing.
+    The terms of one arrangement share a :class:`_Batch` (a register's drive terms, sigma_+^i or sigma_-^i (x) prod_m D_m,
+    differ only in the slice they read and write and in their factor matrices), so a step costs one batched product for
+    all of them. The results are added in the terms' order, in runs of consecutive terms whose target blocks are disjoint,
+    so every element receives its contributions in the order a term-by-term loop gives them. A zero term contributes
+    nothing, and a sum of one live term applies it through views (:class:`_Single`).
     """
 
-    __slots__ = ("_batches", "_runs", "_scatters", "_single", "d", "dims", "n_terms")
+    __slots__ = ("_batches", "_runs", "_scatters", "_single", "d", "dims")
 
     def __init__(self, operators: Sequence[FactorizedOperator]) -> None:
         if not operators:
@@ -471,7 +466,6 @@ class FactorizedSum:
             raise ValueError("the operators of a factorized sum live on one space")
         self.dims = dims
         self.d = _prod(dims)
-        self.n_terms = len(operators)
         terms = [op.term for op in operators]
         groups: dict[tuple[object, ...], list[int]] = {}
         for k, t in enumerate(terms):
@@ -496,8 +490,8 @@ class FactorizedSum:
         self._scatters: dict[int, tuple[_Scatter, ...]] = {}
         self._single: _Single | None = None
         if len(where) == 1:
-            ((batch, (k,)),) = self._batches
-            self._single = _Single(batch, int(k))
+            batch, ks = self._batches[0]
+            self._single = _Single(batch, int(ks[0]))
 
     def _scatter_plan(self, ncols: int) -> tuple[_Scatter, ...]:
         plan = self._scatters.get(ncols)
@@ -520,8 +514,7 @@ class FactorizedSum:
                     np.argsort(target, kind="stable") if full else None,
                 )
             )
-        plan = tuple(out)
-        self._scatters[ncols] = plan
+        plan = self._scatters[ncols] = tuple(out)
         return plan
 
     def apply(self, x: np.ndarray, coefs: np.ndarray) -> np.ndarray:
