@@ -40,9 +40,9 @@ jobs:
       # the explain drawer's index of PLAN.md and the provenance ledger, bundled with the app
       - run: uv run --package qutip-trap-app python -m qutip_trap_app.provenance
         env:
-          # no __pycache__ beside the sources: the bundle would carry this Python's bytecode, which Pyodide cannot use
+          # no __pycache__ beside the sources, which the bundle would carry and Pyodide's Python cannot use
           PYTHONDONTWRITEBYTECODE: "1"
-      # the calibration table and channel library of the circuit the app opens on, which the worker starts from
+      # what the worker starts from: the calibration table and channel library of the circuit the app opens on
       - run: uv run --package qutip-trap-app python -m qutip_trap_app.warm_start
         env:
           PYTHONDONTWRITEBYTECODE: "1"

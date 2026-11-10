@@ -681,10 +681,9 @@ def Shell(store: Store, session: Session, index: ProvenanceIndex) -> ft.Control:
             section, concepts = LEVEL_SECTIONS[level], level_concepts(level)
         drawer = ExplainDrawer(store, session, level, index, section, concepts, docked=docked)
 
-    # asked once per device: the saved learner is read first, so a returning learner never sees the question again. The
-    # dialog opens from an effect through page.show_dialog, which patches the dialog overlay at once. ft.use_dialog
-    # queues that patch instead, and in Flet 0.86 a second render of this component before the queued patch is sent
-    # indexes the overlay's stale snapshot and raises, which ends the session's update loop: nothing re-renders again
+    # asked once per device: the saved learner is read first, so a returning learner never sees the question again.
+    # Opened by page.show_dialog from an effect, not by ft.use_dialog: in Flet 0.86 a second render before the hook's
+    # queued patch is sent raises, which ends the session's update loop, and nothing re-renders again
     def ask_who_is_learning() -> None:
         if store.learner_loaded and not store.learner.asked:
             page.show_dialog(_learner_dialog(session))

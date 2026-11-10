@@ -70,7 +70,7 @@ color = "#F7F7F5"
 dark_color = "#131314"
 
 [tool.flet.boot_screen.flet]
-# between the splash and the first frame, while Python and QuTiP load: the same page colours, a spinner and what the wait is
+# from the splash to the first frame, while Python and QuTiP load: the page colours again, a spinner and the reason
 bgcolor_light = "#F7F7F5"
 bgcolor_dark = "#131314"
 spinner_size = 30
